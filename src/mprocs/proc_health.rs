@@ -14,6 +14,10 @@ use crate::mprocs::yaml_val::{Val, value_to_string};
 /// registry get resolved into this form, as do inline definitions on procs.
 #[derive(Clone, Debug)]
 pub struct HealthCheckDef {
+  /// Display name. For named refs from the top-level registry: the key.
+  /// For inline checks: the empty string at parse time, filled in by the
+  /// proc-level resolver (e.g. "inline[2]").
+  pub name: String,
   pub cmd: String,
   pub interval: Duration,
   pub timeout: Duration,
@@ -24,6 +28,7 @@ pub struct HealthCheckDef {
 impl HealthCheckDef {
   fn defaults() -> Self {
     Self {
+      name: String::new(),
       cmd: String::new(),
       interval: Duration::from_secs(10),
       timeout: Duration::from_secs(5),
@@ -71,7 +76,8 @@ pub fn parse_registry(val: &Val) -> Result<HealthCheckRegistry> {
   let mut out = HashMap::with_capacity(map.len());
   for (k, v) in map {
     let name = value_to_string(&k)?;
-    let def = HealthCheckDef::from_val(&v)?;
+    let mut def = HealthCheckDef::from_val(&v)?;
+    def.name = name.clone();
     out.insert(name, def);
   }
   Ok(out)
@@ -85,6 +91,7 @@ pub fn parse_proc_healthchecks(
 ) -> Result<Vec<HealthCheckDef>> {
   let items = val.as_array()?;
   let mut out = Vec::with_capacity(items.len());
+  let mut inline_seq = 0usize;
   for item in items {
     match item.raw() {
       Value::String(name) => {
@@ -93,7 +100,13 @@ pub fn parse_proc_healthchecks(
         })?;
         out.push(def);
       }
-      Value::Mapping(_) => out.push(HealthCheckDef::from_val(&item)?),
+      Value::Mapping(_) => {
+        let mut def = HealthCheckDef::from_val(&item)?;
+        // Inline checks have no name in the source; auto-label them.
+        def.name = format!("inline[{}]", inline_seq);
+        inline_seq += 1;
+        out.push(def);
+      }
       _ => {
         bail!(
           item.error_at("expected healthcheck name (string) or inline mapping")

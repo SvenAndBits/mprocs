@@ -10,12 +10,14 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc::{
   UnboundedReceiver, UnboundedSender, unbounded_channel,
 };
 use tokio::task::JoinHandle;
 
+use crate::kernel::kernel_message::SharedVt;
 use crate::mprocs::proc_health::{HealthCheckDef, substitute_vars};
 
 #[derive(Debug)]
@@ -76,6 +78,7 @@ impl HealthRunner {
     checks: &[HealthCheckDef],
     vars: &HashMap<String, String>,
     cwd: Option<&std::ffi::OsString>,
+    out_vts: &[Option<SharedVt>],
   ) -> Self {
     let (tx, rx) = unbounded_channel::<HealthEvent>();
     let mut per_check = Vec::with_capacity(checks.len());
@@ -93,6 +96,7 @@ impl HealthRunner {
       let timeout = def.timeout;
       let start_period = def.start_period;
       let tx_clone = tx.clone();
+      let out_vt = out_vts.get(idx).cloned().flatten();
       let handle = tokio::spawn(async move {
         run_check_loop(
           idx,
@@ -102,6 +106,7 @@ impl HealthRunner {
           timeout,
           start_period,
           tx_clone,
+          out_vt,
         )
         .await;
       });
@@ -205,6 +210,7 @@ async fn run_check_loop(
   timeout: Duration,
   start_period: Duration,
   tx: UnboundedSender<HealthEvent>,
+  out_vt: Option<SharedVt>,
 ) {
   let started = Instant::now();
   let mut ticker = tokio::time::interval(interval);
@@ -216,7 +222,9 @@ async fn run_check_loop(
     ticker.tick().await;
     let in_start_period = started.elapsed() < start_period;
 
-    let result = run_check_once(&cmd, cwd.as_ref(), timeout).await;
+    write_banner(out_vt.as_ref(), &cmd);
+    let result = run_check_once(&cmd, cwd.as_ref(), timeout, out_vt.as_ref()).await;
+    write_result(out_vt.as_ref(), &result, in_start_period);
     let event = match result {
       Ok(true) => HealthEvent::Pass(idx),
       _ => {
@@ -234,10 +242,57 @@ async fn run_check_loop(
   }
 }
 
+fn write_banner(out_vt: Option<&SharedVt>, cmd: &str) {
+  if let Some(vt) = out_vt {
+    if let Ok(mut p) = vt.write() {
+      let line = format!(
+        "\r\n\x1b[2m── {} ──\x1b[0m\r\n\x1b[1m$\x1b[0m {}\r\n",
+        compact_time(),
+        cmd
+      );
+      let mut events = Vec::new();
+      p.screen.process(line.as_bytes(), &mut events);
+    }
+  }
+}
+
+fn write_result(
+  out_vt: Option<&SharedVt>,
+  result: &Result<bool, ()>,
+  in_start_period: bool,
+) {
+  if let Some(vt) = out_vt {
+    if let Ok(mut p) = vt.write() {
+      let tag = match (result, in_start_period) {
+        (Ok(true), _) => "\x1b[32m✓ pass\x1b[0m",
+        (Ok(false), true) => "\x1b[33m✗ fail (suppressed: start_period)\x1b[0m",
+        (Ok(false), false) => "\x1b[31m✗ fail\x1b[0m",
+        (Err(_), true) => "\x1b[33m! error (suppressed: start_period)\x1b[0m",
+        (Err(_), false) => "\x1b[31m! error\x1b[0m",
+      };
+      let mut events = Vec::new();
+      p.screen.process(format!("{}\r\n", tag).as_bytes(), &mut events);
+    }
+  }
+}
+
+fn compact_time() -> String {
+  use std::time::{SystemTime, UNIX_EPOCH};
+  let secs = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or(0);
+  let h = (secs / 3600) % 24;
+  let m = (secs / 60) % 60;
+  let s = secs % 60;
+  format!("{:02}:{:02}:{:02} UTC", h, m, s)
+}
+
 async fn run_check_once(
   cmd: &str,
   cwd: Option<&std::ffi::OsString>,
   timeout: Duration,
+  out_vt: Option<&SharedVt>,
 ) -> Result<bool, ()> {
   #[cfg(windows)]
   let mut command = {
@@ -254,15 +309,70 @@ async fn run_check_once(
   if let Some(d) = cwd {
     command.current_dir(d);
   }
+  let capture = out_vt.is_some();
   command.stdin(std::process::Stdio::null());
-  command.stdout(std::process::Stdio::null());
-  command.stderr(std::process::Stdio::null());
+  command.stdout(if capture {
+    std::process::Stdio::piped()
+  } else {
+    std::process::Stdio::null()
+  });
+  command.stderr(if capture {
+    std::process::Stdio::piped()
+  } else {
+    std::process::Stdio::null()
+  });
 
-  let fut = command.status();
+  let mut child = match command.spawn() {
+    Ok(c) => c,
+    Err(_) => return Err(()),
+  };
+  if let Some(vt) = out_vt {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    spawn_pipe(stdout, vt.clone());
+    spawn_pipe(stderr, vt.clone());
+  }
+
+  let fut = child.wait();
   let status = match tokio::time::timeout(timeout, fut).await {
     Ok(Ok(s)) => s,
     Ok(Err(_)) => return Err(()),
     Err(_) => return Err(()), // timed out
   };
   Ok(status.success())
+}
+
+fn spawn_pipe<R: AsyncReadExt + Unpin + Send + 'static>(
+  reader: Option<R>,
+  vt: SharedVt,
+) {
+  let mut reader = match reader {
+    Some(r) => r,
+    None => return,
+  };
+  tokio::spawn(async move {
+    let mut buf = [0u8; 4096];
+    loop {
+      match reader.read(&mut buf).await {
+        Ok(0) | Err(_) => break,
+        Ok(n) => {
+          if let Ok(mut p) = vt.write() {
+            // Convert bare LF to CRLF for the VT parser.
+            let bytes = &buf[..n];
+            let mut out = Vec::with_capacity(n + n / 8);
+            let mut prev = 0u8;
+            for &b in bytes {
+              if b == b'\n' && prev != b'\r' {
+                out.push(b'\r');
+              }
+              out.push(b);
+              prev = b;
+            }
+            let mut events = Vec::new();
+            p.screen.process(&out, &mut events);
+          }
+        }
+      }
+    }
+  });
 }

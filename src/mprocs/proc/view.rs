@@ -4,6 +4,7 @@ use crate::kernel::{
 };
 use crate::mprocs::config::ProcConfig;
 
+use super::children::ProcChild;
 use super::CopyMode;
 
 use std::time::Instant;
@@ -29,10 +30,25 @@ pub struct ProcView {
   pub target_state: TargetState,
   pub last_start: Option<Instant>,
   pub changed: bool,
+
+  /// Hooks + healthchecks as a flat list (rendered as a sub-tree in the
+  /// sidebar). Order: hooks (in declaration order) then checks.
+  pub children: Vec<ProcChild>,
+  /// Whether the sidebar shows this proc's children. Default collapsed.
+  pub expanded: bool,
 }
 
 impl ProcView {
   pub fn new(id: TaskId, cfg: ProcConfig, vt: SharedVt) -> Self {
+    Self::new_with_children(id, cfg, vt, Vec::new())
+  }
+
+  pub fn new_with_children(
+    id: TaskId,
+    cfg: ProcConfig,
+    vt: SharedVt,
+    children: Vec<ProcChild>,
+  ) -> Self {
     Self {
       id,
       cfg,
@@ -44,6 +60,9 @@ impl ProcView {
       target_state: TargetState::None,
       last_start: None,
       changed: false,
+
+      children,
+      expanded: false,
     }
   }
 

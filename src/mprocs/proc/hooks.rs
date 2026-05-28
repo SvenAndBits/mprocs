@@ -8,8 +8,10 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use crate::kernel::kernel_message::SharedVt;
 use crate::mprocs::proc_health::{HookDef, substitute_vars};
 
 /// Outcome of (synchronously) awaiting a hook. For async hooks this is
@@ -28,26 +30,55 @@ pub async fn run_hook(
   hook: &HookDef,
   vars: &HashMap<String, String>,
   cwd: Option<&OsString>,
+  out_vt: Option<SharedVt>,
 ) -> HookResult {
   let cmd_str = substitute_vars(&hook.cmd, vars);
   let cwd = cwd.cloned();
+  write_banner(out_vt.as_ref(), &cmd_str);
   if hook.async_ {
     // Fire-and-forget. Detach a tokio task.
+    let vt_for_task = out_vt.clone();
     tokio::spawn(async move {
-      let _ = exec_shell(&cmd_str, cwd.as_ref()).await;
+      let _ = exec_shell(&cmd_str, cwd.as_ref(), vt_for_task).await;
     });
     return Ok(());
   }
-  match exec_shell(&cmd_str, cwd.as_ref()).await {
+  match exec_shell(&cmd_str, cwd.as_ref(), out_vt).await {
     Ok(code) if code == 0 => Ok(()),
     Ok(code) => Err(HookError::ExitCode(code)),
     Err(e) => Err(HookError::IoError(e)),
   }
 }
 
+fn write_banner(out_vt: Option<&SharedVt>, cmd: &str) {
+  if let Some(vt) = out_vt {
+    if let Ok(mut p) = vt.write() {
+      let stamp = chrono_like_now();
+      let line = format!("\r\n\x1b[2m── {} ──\x1b[0m\r\n\x1b[1m$\x1b[0m {}\r\n", stamp, cmd);
+      let mut events = Vec::new();
+      p.screen.process(line.as_bytes(), &mut events);
+    }
+  }
+}
+
+/// Compact local timestamp without pulling in the chrono crate.
+fn chrono_like_now() -> String {
+  use std::time::{SystemTime, UNIX_EPOCH};
+  let secs = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or(0);
+  // Best-effort wall-clock HH:MM:SS in UTC (no TZ libs).
+  let h = (secs / 3600) % 24;
+  let m = (secs / 60) % 60;
+  let s = secs % 60;
+  format!("{:02}:{:02}:{:02} UTC", h, m, s)
+}
+
 async fn exec_shell(
   cmd: &str,
   cwd: Option<&OsString>,
+  out_vt: Option<SharedVt>,
 ) -> Result<i32, String> {
   #[cfg(windows)]
   let mut command = {
@@ -64,11 +95,78 @@ async fn exec_shell(
   if let Some(d) = cwd {
     command.current_dir(d);
   }
+  let capture = out_vt.is_some();
   command.stdin(std::process::Stdio::null());
-  command.stdout(std::process::Stdio::null());
-  command.stderr(std::process::Stdio::null());
-  match command.status().await {
+  command.stdout(if capture {
+    std::process::Stdio::piped()
+  } else {
+    std::process::Stdio::null()
+  });
+  command.stderr(if capture {
+    std::process::Stdio::piped()
+  } else {
+    std::process::Stdio::null()
+  });
+
+  let mut child = command.spawn().map_err(|e| e.to_string())?;
+  if let Some(vt) = out_vt {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    spawn_pipe(stdout, vt.clone());
+    spawn_pipe(stderr, vt);
+  }
+  match child.wait().await {
     Ok(s) => Ok(s.code().unwrap_or(-1)),
     Err(e) => Err(e.to_string()),
   }
+}
+
+fn spawn_pipe<R: AsyncReadExt + Unpin + Send + 'static>(
+  reader: Option<R>,
+  vt: SharedVt,
+) {
+  let mut reader = match reader {
+    Some(r) => r,
+    None => return,
+  };
+  tokio::spawn(async move {
+    let mut buf = [0u8; 4096];
+    loop {
+      match reader.read(&mut buf).await {
+        Ok(0) | Err(_) => break,
+        Ok(n) => {
+          if let Ok(mut p) = vt.write() {
+            // Many shell tools emit bare LF; the TTY parser expects CRLF.
+            // Insert CR before LF unless the previous byte was already CR.
+            let bytes = &buf[..n];
+            let mut needs_translate = false;
+            let mut last = 0u8;
+            for &b in bytes {
+              if b == b'\n' && last != b'\r' {
+                needs_translate = true;
+                break;
+              }
+              last = b;
+            }
+            if needs_translate {
+              let mut out = Vec::with_capacity(n + n / 8);
+              let mut prev = 0u8;
+              for &b in bytes {
+                if b == b'\n' && prev != b'\r' {
+                  out.push(b'\r');
+                }
+                out.push(b);
+                prev = b;
+              }
+              let mut events = Vec::new();
+              p.screen.process(&out, &mut events);
+            } else {
+              let mut events = Vec::new();
+              p.screen.process(bytes, &mut events);
+            }
+          }
+        }
+      }
+    }
+  });
 }

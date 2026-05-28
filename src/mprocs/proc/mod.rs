@@ -1,3 +1,4 @@
+pub mod children;
 pub mod health;
 pub mod hooks;
 mod inst;

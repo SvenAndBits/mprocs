@@ -22,6 +22,7 @@ use crate::term::key::Key;
 use crate::term::mouse::{MouseEvent, MouseEventKind};
 use crate::term::{MouseProtocolMode, Parser};
 
+use super::children::{ChildKind, ChildStatus, ProcChild, new_child_vt};
 use super::health::{AggregateOutcome, HealthRunner};
 use super::hooks::run_hook;
 use super::inst::Inst;
@@ -58,6 +59,11 @@ pub struct Proc {
   /// current instance (so we don't repeat the "Started" event on healthcheck
   /// flapping).
   reported_running: bool,
+  /// Per-healthcheck VTs (output capture). Indexed parallel to
+  /// `healthchecks`. The supervisor task pushes bytes here, the UI reads.
+  check_vts: Vec<SharedVt>,
+  /// Per-hook-event VTs. Created on demand for events that have a hook.
+  hook_vts: std::collections::HashMap<HookEvent, SharedVt>,
 }
 
 #[derive(Debug)]
@@ -75,8 +81,60 @@ pub fn launch_proc(
   size: Rect,
 ) -> ProcView {
   let vt = SharedVt::new(Parser::new(size.height, size.width, cfg.scrollback_len));
+
+  // Pre-create per-child VTs in the launcher so the ProcView and the proc
+  // task share the same Arc — both UI rendering (via ProcView.children)
+  // and output capture (via Proc.{check_vts,hook_vts}) point at one VT.
+  let check_vts: Vec<SharedVt> =
+    cfg.healthchecks.iter().map(|_| new_child_vt()).collect();
+  let mut hook_vts: std::collections::HashMap<HookEvent, SharedVt> =
+    std::collections::HashMap::new();
+  for event in [
+    HookEvent::Started,
+    HookEvent::Running,
+    HookEvent::Unhealthy,
+    HookEvent::Stopped,
+    HookEvent::Failed,
+  ] {
+    if cfg.hooks.get(event).is_some() {
+      hook_vts.insert(event, new_child_vt());
+    }
+  }
+
+  let mut children: Vec<ProcChild> = Vec::new();
+  // Order: hooks first (small, fixed set), then checks.
+  for event in [
+    HookEvent::Started,
+    HookEvent::Running,
+    HookEvent::Unhealthy,
+    HookEvent::Stopped,
+    HookEvent::Failed,
+  ] {
+    if let Some(vt) = hook_vts.get(&event) {
+      children.push(ProcChild {
+        task_id: parent_ks.alloc_id(), // placeholder id; real registration follows
+        kind: ChildKind::Hook(event),
+        name: hook_event_label(event).to_string(),
+        vt: vt.clone(),
+        status: ChildStatus::Idle,
+      });
+    }
+  }
+  for (idx, def) in cfg.healthchecks.iter().enumerate() {
+    let label = healthcheck_display_name(def, idx);
+    children.push(ProcChild {
+      task_id: parent_ks.alloc_id(),
+      kind: ChildKind::Check(idx),
+      name: label,
+      vt: check_vts[idx].clone(),
+      status: ChildStatus::Idle,
+    });
+  }
+
   let cfg_ = cfg.clone();
   let task_vt = vt.clone();
+  let check_vts_for_task = check_vts.clone();
+  let hook_vts_for_task = hook_vts.clone();
   let child_id = parent_ks.spawn_async_with_id(
     task_id,
     TaskDef {
@@ -89,25 +147,67 @@ pub fn launch_proc(
     move |ks, cmd_receiver| async move {
       let cfg = cfg_;
       let task_id = ks.task_id;
-      proc_main_loop(ks, task_id, &cfg, size, task_vt, cmd_receiver).await;
+      proc_main_loop(
+        ks,
+        task_id,
+        &cfg,
+        size,
+        task_vt,
+        check_vts_for_task,
+        hook_vts_for_task,
+        cmd_receiver,
+      )
+      .await;
     },
   );
 
-  ProcView::new(child_id, cfg, vt)
+  ProcView::new_with_children(child_id, cfg, vt, children)
 }
 
+fn hook_event_label(event: HookEvent) -> &'static str {
+  match event {
+    HookEvent::Started => "started",
+    HookEvent::Running => "running",
+    HookEvent::Unhealthy => "unhealthy",
+    HookEvent::Stopped => "stopped",
+    HookEvent::Failed => "failed",
+  }
+}
+
+fn healthcheck_display_name(
+  def: &HealthCheckDef,
+  idx: usize,
+) -> String {
+  if def.name.is_empty() {
+    format!("check[{}]", idx)
+  } else {
+    def.name.clone()
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn proc_main_loop(
   ks: TaskContext,
   task_id: TaskId,
   cfg: &ProcConfig,
   size: Rect,
   vt: SharedVt,
+  check_vts: Vec<SharedVt>,
+  hook_vts: std::collections::HashMap<HookEvent, SharedVt>,
   mut cmd_receiver: UnboundedReceiver<TaskCmd>,
 ) -> ProcView {
   let (internal_sender, mut internal_receiver) =
     tokio::sync::mpsc::unbounded_channel();
-  let mut proc =
-    Proc::new(task_id, cfg, vt.clone(), internal_sender, size).await;
+  let mut proc = Proc::new(
+    task_id,
+    cfg,
+    vt.clone(),
+    internal_sender,
+    size,
+    check_vts,
+    hook_vts,
+  )
+  .await;
 
   let mut task_screen = TaskScreen::new(task_id, vt);
   let mut screen_effects: Vec<TaskScreenEffect> = Vec::new();
@@ -301,7 +401,8 @@ async fn run_lifecycle_hook(proc: &Proc, event: HookEvent) -> bool {
     None => return true,
   };
   let async_ = hook.async_;
-  match run_hook(hook, &proc.vars, proc.cwd.as_ref()).await {
+  let out_vt = proc.hook_vts.get(&event).cloned();
+  match run_hook(hook, &proc.vars, proc.cwd.as_ref(), out_vt).await {
     Ok(()) => true,
     Err(err) => {
       log::warn!(
@@ -345,6 +446,8 @@ impl Proc {
     vt: SharedVt,
     tx: UnboundedSender<ProcEvent>,
     area: Rect,
+    check_vts: Vec<SharedVt>,
+    hook_vts: std::collections::HashMap<HookEvent, SharedVt>,
   ) -> Self {
     let size = Size {
       width: area.width,
@@ -371,6 +474,8 @@ impl Proc {
       hooks: cfg.hooks.clone(),
       health_runner: None,
       reported_running: false,
+      check_vts,
+      hook_vts,
     };
 
     if cfg.autostart {
@@ -395,10 +500,13 @@ impl Proc {
   fn reset_health_state(&mut self) {
     self.reported_running = false;
     if self.has_healthchecks() {
+      let out_vts: Vec<Option<SharedVt>> =
+        self.check_vts.iter().cloned().map(Some).collect();
       self.health_runner = Some(HealthRunner::spawn(
         &self.healthchecks,
         &self.vars,
         self.cwd.as_ref(),
+        &out_vts,
       ));
     } else {
       self.health_runner = None;
