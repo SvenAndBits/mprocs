@@ -247,6 +247,12 @@ async fn run_check_loop(
 ) {
   let started = Instant::now();
   let mut ticker = tokio::time::interval(interval);
+  // Pace from the end of the last invocation, not from a fixed wall
+  // clock. Default `Burst` semantics make `tokio::time::interval` fire
+  // missed ticks back-to-back when a check ran longer than its
+  // interval, which compounds spawn pressure across all checks and
+  // can trigger EAGAIN on fork. `Delay` keeps invocations spaced.
+  ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
   // Skip the immediate tick fired by `interval` — wait one period before
   // the first check (gives the process a chance to come up).
   ticker.tick().await;
