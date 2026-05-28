@@ -262,14 +262,14 @@ async fn run_check_loop(
     let result = run_check_once(&cmd, cwd.as_ref(), &env, timeout, out_vt.as_ref()).await;
     write_result(out_vt.as_ref(), &result, in_start_period);
     if let Some(id) = task_id {
-      let exit = match result {
+      let exit = match &result {
         Ok(true) => 0,
         Ok(false) => 1,
-        Err(()) => 254,
+        Err(_) => 254,
       };
       ks.send_for_task(id, KernelCommand::TaskStopped(exit));
     }
-    let event = match result {
+    let event = match &result {
       Ok(true) => HealthEvent::Pass(idx),
       _ => {
         if in_start_period {
@@ -307,10 +307,10 @@ pub async fn run_check_once_manual(
   let result = run_check_once(&cmd, cwd.as_ref(), &env, timeout, out_vt.as_ref()).await;
   write_result(out_vt.as_ref(), &result, false);
   if let Some(id) = task_id {
-    let exit = match result {
+    let exit = match &result {
       Ok(true) => 0,
       Ok(false) => 1,
-      Err(()) => 254,
+      Err(_) => 254,
     };
     ks.send_for_task(id, KernelCommand::TaskStopped(exit));
   }
@@ -329,18 +329,25 @@ fn write_banner(out_vt: Option<&SharedVt>, cmd: &str) {
 
 fn write_result(
   out_vt: Option<&SharedVt>,
-  result: &Result<bool, ()>,
+  result: &CheckResult,
   in_start_period: bool,
 ) {
   if let Some(vt) = out_vt {
-    let tag = match (result, in_start_period) {
-      (Ok(true), _) => "\x1b[32m✓ pass\x1b[0m",
-      (Ok(false), true) => "\x1b[33m✗ fail (suppressed: start_period)\x1b[0m",
-      (Ok(false), false) => "\x1b[31m✗ fail\x1b[0m",
-      (Err(_), true) => "\x1b[33m! error (suppressed: start_period)\x1b[0m",
-      (Err(_), false) => "\x1b[31m! error\x1b[0m",
+    let line = match (result, in_start_period) {
+      (Ok(true), _) => "\x1b[32m✓ pass\x1b[0m".to_string(),
+      (Ok(false), true) => {
+        "\x1b[33m✗ fail (suppressed: start_period)\x1b[0m".to_string()
+      }
+      (Ok(false), false) => "\x1b[31m✗ fail\x1b[0m".to_string(),
+      (Err(why), true) => format!(
+        "\x1b[33m! error (suppressed: start_period): {}\x1b[0m",
+        why
+      ),
+      (Err(why), false) => {
+        format!("\x1b[31m! error: {}\x1b[0m", why)
+      }
     };
-    super::children::vt_process_safe(vt, format!("{}\r\n", tag).as_bytes());
+    super::children::vt_process_safe(vt, format!("{}\r\n", line).as_bytes());
   }
 }
 
@@ -356,13 +363,20 @@ fn compact_time() -> String {
   format!("{:02}:{:02}:{:02} UTC", h, m, s)
 }
 
+/// Outcome of a single check invocation. `Ok(bool)` = command ran to
+/// completion; bool is whether the exit code was 0. `Err(reason)` = we
+/// couldn't even get an exit code (spawn failed, wait failed, or our
+/// timeout fired). The reason flows up into the captured-output VT so
+/// the user can see it in the tree.
+type CheckResult = Result<bool, String>;
+
 async fn run_check_once(
   cmd: &str,
   cwd: Option<&std::ffi::OsString>,
   env: &super::hooks::EnvOverrides,
   timeout: Duration,
   out_vt: Option<&SharedVt>,
-) -> Result<bool, ()> {
+) -> CheckResult {
   #[cfg(windows)]
   let mut command = {
     let mut c = Command::new("pwsh.exe");
@@ -403,7 +417,7 @@ async fn run_check_once(
 
   let mut child = match command.spawn() {
     Ok(c) => c,
-    Err(_) => return Err(()),
+    Err(e) => return Err(format!("spawn failed: {} (kind: {:?})", e, e.kind())),
   };
   if let Some(vt) = out_vt {
     let stdout = child.stdout.take();
@@ -413,12 +427,11 @@ async fn run_check_once(
   }
 
   let fut = child.wait();
-  let status = match tokio::time::timeout(timeout, fut).await {
-    Ok(Ok(s)) => s,
-    Ok(Err(_)) => return Err(()),
-    Err(_) => return Err(()), // timed out
-  };
-  Ok(status.success())
+  match tokio::time::timeout(timeout, fut).await {
+    Ok(Ok(s)) => Ok(s.success()),
+    Ok(Err(e)) => Err(format!("wait failed: {} (kind: {:?})", e, e.kind())),
+    Err(_) => Err(format!("timed out after {:?}", timeout)),
+  }
 }
 
 fn spawn_pipe<R: AsyncReadExt + Unpin + Send + 'static>(
