@@ -200,6 +200,20 @@ pub fn launch_proc(
     },
   );
 
+  // If the user wants this proc up automatically, ask the kernel to
+  // start it. The kernel applies the dep gate to this command exactly
+  // like a user-issued `s` keypress would, so an autostart proc with
+  // unsatisfied deps waits — and so do its healthchecks, since they
+  // only spawn inside `spawn_new_inst`.
+  if cfg.autostart {
+    parent_ks.send(
+      crate::kernel::kernel_message::KernelCommand::TaskCmd(
+        child_id,
+        TaskCmd::Start,
+      ),
+    );
+  }
+
   ProcView::new_with_children(child_id, cfg, vt, children)
 }
 
@@ -610,10 +624,12 @@ impl Proc {
       ks,
     };
 
-    if cfg.autostart {
-      proc.spawn_new_inst().await;
-    }
-
+    // Autostart used to spawn the subprocess here directly. That
+    // bypassed the kernel's dep gate — an autostart proc with `deps:`
+    // would fire (and its healthchecks too) before its dependencies
+    // were Running. Autostart is now driven from `launch_proc` by
+    // sending a regular `Start` command into the kernel, which gates
+    // on deps just like every other Start.
     proc
   }
 
