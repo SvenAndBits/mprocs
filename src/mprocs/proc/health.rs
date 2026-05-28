@@ -318,15 +318,12 @@ pub async fn run_check_once_manual(
 
 fn write_banner(out_vt: Option<&SharedVt>, cmd: &str) {
   if let Some(vt) = out_vt {
-    if let Ok(mut p) = vt.write() {
-      let line = format!(
-        "\r\n\x1b[2m── {} ──\x1b[0m\r\n\x1b[1m$\x1b[0m {}\r\n",
-        compact_time(),
-        cmd
-      );
-      let mut events = Vec::new();
-      p.screen.process(line.as_bytes(), &mut events);
-    }
+    let line = format!(
+      "\r\n\x1b[2m── {} ──\x1b[0m\r\n\x1b[1m$\x1b[0m {}\r\n",
+      compact_time(),
+      cmd
+    );
+    super::children::vt_process_safe(vt, line.as_bytes());
   }
 }
 
@@ -336,17 +333,14 @@ fn write_result(
   in_start_period: bool,
 ) {
   if let Some(vt) = out_vt {
-    if let Ok(mut p) = vt.write() {
-      let tag = match (result, in_start_period) {
-        (Ok(true), _) => "\x1b[32m✓ pass\x1b[0m",
-        (Ok(false), true) => "\x1b[33m✗ fail (suppressed: start_period)\x1b[0m",
-        (Ok(false), false) => "\x1b[31m✗ fail\x1b[0m",
-        (Err(_), true) => "\x1b[33m! error (suppressed: start_period)\x1b[0m",
-        (Err(_), false) => "\x1b[31m! error\x1b[0m",
-      };
-      let mut events = Vec::new();
-      p.screen.process(format!("{}\r\n", tag).as_bytes(), &mut events);
-    }
+    let tag = match (result, in_start_period) {
+      (Ok(true), _) => "\x1b[32m✓ pass\x1b[0m",
+      (Ok(false), true) => "\x1b[33m✗ fail (suppressed: start_period)\x1b[0m",
+      (Ok(false), false) => "\x1b[31m✗ fail\x1b[0m",
+      (Err(_), true) => "\x1b[33m! error (suppressed: start_period)\x1b[0m",
+      (Err(_), false) => "\x1b[31m! error\x1b[0m",
+    };
+    super::children::vt_process_safe(vt, format!("{}\r\n", tag).as_bytes());
   }
 }
 
@@ -441,21 +435,18 @@ fn spawn_pipe<R: AsyncReadExt + Unpin + Send + 'static>(
       match reader.read(&mut buf).await {
         Ok(0) | Err(_) => break,
         Ok(n) => {
-          if let Ok(mut p) = vt.write() {
-            // Convert bare LF to CRLF for the VT parser.
-            let bytes = &buf[..n];
-            let mut out = Vec::with_capacity(n + n / 8);
-            let mut prev = 0u8;
-            for &b in bytes {
-              if b == b'\n' && prev != b'\r' {
-                out.push(b'\r');
-              }
-              out.push(b);
-              prev = b;
+          // Convert bare LF to CRLF for the VT parser.
+          let bytes = &buf[..n];
+          let mut out = Vec::with_capacity(n + n / 8);
+          let mut prev = 0u8;
+          for &b in bytes {
+            if b == b'\n' && prev != b'\r' {
+              out.push(b'\r');
             }
-            let mut events = Vec::new();
-            p.screen.process(&out, &mut events);
+            out.push(b);
+            prev = b;
           }
+          super::children::vt_process_safe(&vt, &out);
         }
       }
     }

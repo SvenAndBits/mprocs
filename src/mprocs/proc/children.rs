@@ -57,6 +57,26 @@ pub struct ProcChild {
   pub status: ChildStatus,
 }
 
+/// Feed bytes into a per-child VT, catching any panic the vt100 parser
+/// might throw on unusual input (the parser has out-of-bounds asserts
+/// that have been observed to fire on certain ANSI sequences from
+/// captured subprocess output). A panic drops the offending frame
+/// rather than taking the tokio runtime down.
+pub fn vt_process_safe(vt: &SharedVt, bytes: &[u8]) {
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    if let Ok(mut p) = vt.write() {
+      let mut events = Vec::new();
+      p.screen.process(bytes, &mut events);
+    }
+  }));
+  if result.is_err() {
+    log::warn!(
+      "vt parser panicked on child output ({} bytes); frame dropped",
+      bytes.len()
+    );
+  }
+}
+
 /// Thread-safe handle that the proc's main loop and the per-check tokio
 /// tasks share, so output-capture writes can be routed without touching
 /// the ProcView (which lives in the UI thread).

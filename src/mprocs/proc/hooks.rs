@@ -59,12 +59,12 @@ pub async fn run_hook(
 
 fn write_banner(out_vt: Option<&SharedVt>, cmd: &str) {
   if let Some(vt) = out_vt {
-    if let Ok(mut p) = vt.write() {
-      let stamp = chrono_like_now();
-      let line = format!("\r\n\x1b[2m── {} ──\x1b[0m\r\n\x1b[1m$\x1b[0m {}\r\n", stamp, cmd);
-      let mut events = Vec::new();
-      p.screen.process(line.as_bytes(), &mut events);
-    }
+    let stamp = chrono_like_now();
+    let line = format!(
+      "\r\n\x1b[2m── {} ──\x1b[0m\r\n\x1b[1m$\x1b[0m {}\r\n",
+      stamp, cmd
+    );
+    super::children::vt_process_safe(vt, line.as_bytes());
   }
 }
 
@@ -153,35 +153,31 @@ fn spawn_pipe<R: AsyncReadExt + Unpin + Send + 'static>(
       match reader.read(&mut buf).await {
         Ok(0) | Err(_) => break,
         Ok(n) => {
-          if let Ok(mut p) = vt.write() {
-            // Many shell tools emit bare LF; the TTY parser expects CRLF.
-            // Insert CR before LF unless the previous byte was already CR.
-            let bytes = &buf[..n];
-            let mut needs_translate = false;
-            let mut last = 0u8;
+          // Many shell tools emit bare LF; the TTY parser expects CRLF.
+          // Insert CR before LF unless the previous byte was already CR.
+          let bytes = &buf[..n];
+          let mut needs_translate = false;
+          let mut last = 0u8;
+          for &b in bytes {
+            if b == b'\n' && last != b'\r' {
+              needs_translate = true;
+              break;
+            }
+            last = b;
+          }
+          if needs_translate {
+            let mut out = Vec::with_capacity(n + n / 8);
+            let mut prev = 0u8;
             for &b in bytes {
-              if b == b'\n' && last != b'\r' {
-                needs_translate = true;
-                break;
+              if b == b'\n' && prev != b'\r' {
+                out.push(b'\r');
               }
-              last = b;
+              out.push(b);
+              prev = b;
             }
-            if needs_translate {
-              let mut out = Vec::with_capacity(n + n / 8);
-              let mut prev = 0u8;
-              for &b in bytes {
-                if b == b'\n' && prev != b'\r' {
-                  out.push(b'\r');
-                }
-                out.push(b);
-                prev = b;
-              }
-              let mut events = Vec::new();
-              p.screen.process(&out, &mut events);
-            } else {
-              let mut events = Vec::new();
-              p.screen.process(bytes, &mut events);
-            }
+            super::children::vt_process_safe(&vt, &out);
+          } else {
+            super::children::vt_process_safe(&vt, bytes);
           }
         }
       }
