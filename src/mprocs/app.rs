@@ -729,13 +729,17 @@ impl App {
               let proc_id = proc.id;
               let cmd = match child.kind {
                 ChildKind::Hook(event) => {
-                  TaskCmd::msg(ProcMsg::RerunHook(event))
+                  Some(TaskCmd::msg(ProcMsg::RerunHook(event)))
                 }
                 ChildKind::Check(idx) => {
-                  TaskCmd::msg(ProcMsg::RerunCheck(idx))
+                  Some(TaskCmd::msg(ProcMsg::RerunCheck(idx)))
                 }
+                // Synthetic row — there's nothing to re-run.
+                ChildKind::Deps => None,
               };
-              pc.send(KernelCommand::TaskCmd(proc_id, cmd));
+              if let Some(cmd) = cmd {
+                pc.send(KernelCommand::TaskCmd(proc_id, cmd));
+              }
               loop_action.render();
               return;
             }
@@ -1264,7 +1268,7 @@ fn update_child_status(
   use crate::mprocs::proc::children::ChildStatus;
   for proc in procs.iter_mut() {
     for child in proc.children.iter_mut() {
-      if child.task_id == task_id {
+      if child.task_id == Some(task_id) {
         // Track `last_stable_status` for the RUN-flicker debounce —
         // any non-Running status is "stable"; Running is a transient
         // we may want to suppress visually.

@@ -98,6 +98,9 @@ pub fn render_procs(
 
     if proc.expanded {
       let parent_is_up = proc.is_up();
+      // Computed once per proc (rather than per child) and only used for
+      // the Deps row; Hook/Check rows ignore it.
+      let deps_counts = deps_ready_counts(proc, &state.procs);
       for (ci, child) in proc.children.iter().enumerate() {
         if y_cursor >= y_max {
           break;
@@ -110,7 +113,14 @@ pub fn render_procs(
         };
         let child_selected = proc_idx == state.selected()
           && proc.focused_child == Some(ci);
-        render_child_row(grid, row_area, child, child_selected, parent_is_up);
+        render_child_row(
+          grid,
+          row_area,
+          child,
+          child_selected,
+          parent_is_up,
+          deps_counts,
+        );
         y_cursor += 1;
       }
     }
@@ -122,6 +132,22 @@ pub fn render_procs(
 /// command in that case, so it sits in NotStarted; we want the sidebar
 /// to show that as "WAITING" rather than the same gray "DOWN" used for
 /// procs the user has stopped.
+/// (ready, total) count of declared deps for `proc`, where "ready" means
+/// the dep proc is currently Running. Unknown dep names (typos) count
+/// toward total but not ready.
+fn deps_ready_counts(proc: &ProcView, all_procs: &[ProcView]) -> (usize, usize) {
+  let mut ready = 0;
+  let total = proc.cfg.deps.len();
+  for dep_name in &proc.cfg.deps {
+    if let Some(dep) = all_procs.iter().find(|p| p.cfg.name == *dep_name) {
+      if matches!(dep.status, TaskStatus::Running) {
+        ready += 1;
+      }
+    }
+  }
+  (ready, total)
+}
+
 fn proc_is_waiting_for_deps(proc: &ProcView, all_procs: &[ProcView]) -> bool {
   if !matches!(proc.status, TaskStatus::NotStarted) {
     return false;
@@ -189,6 +215,7 @@ fn render_child_row(
   child: &ProcChild,
   selected: bool,
   parent_is_up: bool,
+  deps_counts: (usize, usize),
 ) {
   let attrs = if selected {
     Attrs::default().bg(Color::Idx(240))
@@ -209,23 +236,49 @@ fn render_child_row(
   row_area.x += r.width;
   row_area.width = row_area.width.saturating_sub(r.width);
 
-  let kind_label = match child.kind {
-    ChildKind::Hook(_) => "hook:",
-    ChildKind::Check(_) => "check:",
-  };
-  let r = grid.draw_text(
-    row_area,
-    kind_label,
-    attrs.clone().fg(Color::BRIGHT_BLACK),
-  );
-  row_area.x += r.width;
-  row_area.width = row_area.width.saturating_sub(r.width);
+  // Kind prefix — Deps has no prefix, just `deps`.
+  if !matches!(child.kind, ChildKind::Deps) {
+    let kind_label = match child.kind {
+      ChildKind::Hook(_) => "hook:",
+      ChildKind::Check(_) => "check:",
+      ChildKind::Deps => unreachable!(),
+    };
+    let r = grid.draw_text(
+      row_area,
+      kind_label,
+      attrs.clone().fg(Color::BRIGHT_BLACK),
+    );
+    row_area.x += r.width;
+    row_area.width = row_area.width.saturating_sub(r.width);
+  }
   let r = grid.draw_text(row_area, child.name.as_str(), attrs);
   row_area.x += r.width;
   row_area.width = row_area.width.saturating_sub(r.width);
 
-  let (text, pill_attrs) = status_pill_for_child(child, attrs, parent_is_up);
+  let (text, pill_attrs) = match child.kind {
+    ChildKind::Deps => status_pill_for_deps(deps_counts, attrs, parent_is_up),
+    _ => status_pill_for_child(child, attrs, parent_is_up),
+  };
   draw_right_aligned_pill(grid, row_area, &text, pill_attrs, attrs);
+}
+
+fn status_pill_for_deps<'a>(
+  (ready, total): (usize, usize),
+  mut base: Attrs,
+  parent_is_up: bool,
+) -> (Cow<'a, str>, Attrs) {
+  let text = format!(" {}/{} ", ready, total);
+  // Same staleness convention as the per-check pills — when the parent
+  // proc is down, dep status changes no longer affect it; gray it.
+  if !parent_is_up {
+    return (Cow::from(text), base.fg(Color::BRIGHT_BLACK));
+  }
+  let color = if ready == total {
+    Color::BRIGHT_GREEN
+  } else {
+    Color::BRIGHT_YELLOW
+  };
+  (Cow::from(text), base.set_bold(true).fg(color))
 }
 
 fn draw_right_aligned_pill(

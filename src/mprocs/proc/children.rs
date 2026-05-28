@@ -34,6 +34,11 @@ pub enum ChildKind {
   /// addressable only by index; named checks duplicate the name in
   /// `ProcChild::name` for display purposes.
   Check(usize),
+  /// Synthetic row that summarizes the parent proc's `deps:`. Not
+  /// backed by a kernel task — it's a UI projection of the live
+  /// status of each declared dep proc. There is at most one of
+  /// these per proc, always rendered first under it.
+  Deps,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,7 +55,9 @@ pub enum ChildStatus {
 /// One row in the sidebar tree under a proc.
 pub struct ProcChild {
   /// Kernel task id for this child (allows ctl/dekit addressing).
-  pub task_id: TaskId,
+  /// `None` for synthetic rows (e.g. `ChildKind::Deps`) which aren't
+  /// backed by a kernel task.
+  pub task_id: Option<TaskId>,
   pub kind: ChildKind,
   /// Display label (e.g. "started", "is_port_open", "check[2]").
   pub name: String,

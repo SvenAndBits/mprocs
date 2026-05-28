@@ -126,6 +126,24 @@ pub fn launch_proc(
 
   let parent_path_str = path.as_ref().map(|p| p.as_str().to_owned());
 
+  // Synthetic deps row — UI-only projection of cfg.deps × live state
+  // of the dep procs. First in the children list so it sits at the
+  // top of the proc's subtree.
+  if !cfg.deps.is_empty() {
+    children.push(ProcChild {
+      task_id: None,
+      kind: ChildKind::Deps,
+      name: "deps".to_string(),
+      // Placeholder VT — never written to. The right-pane renderer
+      // detects ChildKind::Deps and composes the deps list on the
+      // fly instead of reading from this VT.
+      vt: new_child_vt(),
+      status: ChildStatus::Idle,
+      last_stable_status: ChildStatus::Idle,
+      status_changed_at: None,
+    });
+  }
+
   for event in [
     HookEvent::Started,
     HookEvent::Running,
@@ -141,7 +159,7 @@ pub fn launch_proc(
       let child_id = register_child_task(parent_ks, child_path, vt.clone());
       hook_task_ids.insert(event, child_id);
       children.push(ProcChild {
-        task_id: child_id,
+        task_id: Some(child_id),
         kind: ChildKind::Hook(event),
         name: label.to_string(),
         vt,
@@ -160,7 +178,7 @@ pub fn launch_proc(
     let child_id = register_child_task(parent_ks, child_path, vt.clone());
     check_task_ids.push(child_id);
     children.push(ProcChild {
-      task_id: child_id,
+      task_id: Some(child_id),
       kind: ChildKind::Check(idx),
       name: label,
       vt,
