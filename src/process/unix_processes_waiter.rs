@@ -18,17 +18,34 @@ static GLOBAL: Mutex<Option<UnixProcessesWaiter>> = Mutex::new(None);
 
 impl UnixProcessesWaiter {
   pub fn wait_for(pid: Pid, f: Box<dyn Fn(WaitStatus) + Send + Sync>) {
+    // Fast path: child already exited and the SIGCHLD-driven loop
+    // stashed it.
+    {
+      let guard = GLOBAL.lock();
+      if let Ok(mut guard) = guard {
+        if let Some(pw) = guard.as_mut() {
+          if let Some(wait_status) = pw.unclaimed.remove(&pid) {
+            drop(guard);
+            f(wait_status);
+            return;
+          }
+        }
+      }
+    }
+    // Slow path: SIGCHLD may have already fired before we registered
+    // (and been ignored, since the new handler only reaps listed PIDs).
+    // Do a non-blocking waitpid on this specific PID to catch that.
+    if let Ok(Some((_, wait_status))) =
+      rustix::process::waitpid(Some(pid), WaitOptions::NOHANG)
+    {
+      f(wait_status);
+      return;
+    }
+    // Register and wait for SIGCHLD to fire.
     match GLOBAL.lock() {
       Ok(mut guard) => {
         if let Some(pw) = guard.as_mut() {
-          match pw.unclaimed.remove(&pid) {
-            Some(wait_status) => {
-              f(wait_status);
-            }
-            None => {
-              pw.listeners.insert(pid, f);
-            }
-          }
+          pw.listeners.insert(pid, f);
         }
       }
       Err(_) => (),
@@ -45,35 +62,53 @@ impl UnixProcessesWaiter {
     let thread: tokio::task::JoinHandle<anyhow::Result<()>> =
       tokio::spawn(async move {
         while let Some(()) = signals.recv().await {
-          loop {
-            match rustix::process::wait(WaitOptions::NOHANG) {
-              Ok(Some((pid, wait_status))) => match GLOBAL.lock() {
-                Ok(mut guard) => {
-                  let pw = guard.as_mut().unwrap();
-                  match pw.listeners.remove(&pid) {
-                    Some(listener) => {
-                      listener(wait_status);
-                    }
-                    None => {
-                      pw.unclaimed.insert(pid, wait_status);
-                    }
+          // Only reap PIDs we have registered listeners for. Reaping
+          // any child (waitpid(-1)) races with tokio's own child reaper
+          // for subprocesses spawned via tokio::process::Command (health
+          // checks, hooks, stop cmds) and causes them to fail with
+          // ECHILD on their wait().
+          let pids: Vec<Pid> = match GLOBAL.lock() {
+            Ok(guard) => guard
+              .as_ref()
+              .map(|pw| pw.listeners.keys().copied().collect())
+              .unwrap_or_default(),
+            Err(_) => continue,
+          };
+          for pid in pids {
+            match rustix::process::waitpid(Some(pid), WaitOptions::NOHANG) {
+              Ok(Some((_, wait_status))) => {
+                let listener_opt = match GLOBAL.lock() {
+                  Ok(mut guard) => guard
+                    .as_mut()
+                    .and_then(|pw| pw.listeners.remove(&pid)),
+                  Err(_) => None,
+                };
+                if let Some(listener) = listener_opt {
+                  listener(wait_status);
+                } else if let Ok(mut guard) = GLOBAL.lock() {
+                  if let Some(pw) = guard.as_mut() {
+                    pw.unclaimed.insert(pid, wait_status);
                   }
                 }
-                Err(e) => {
-                  log::error!("SIGCHLD signal init error: {}", e);
-                }
-              },
-              Ok(None) => break,
+              }
+              Ok(None) => (), // child not yet exited
               Err(e) => {
-                // ECHILD - No spawned processes.
+                // ECHILD just means our listener PID has already been
+                // reaped (possibly by the wait_for slow path). Quietly
+                // drop the listener.
                 if e.raw_os_error() != libc::ECHILD {
                   log::error!(
-                    "ProcessesWaiter wait() error: {} ({})",
+                    "ProcessesWaiter waitpid({}) error: {} ({})",
+                    pid.as_raw_nonzero(),
                     e.kind(),
                     e.raw_os_error()
                   );
                 }
-                break;
+                if let Ok(mut guard) = GLOBAL.lock() {
+                  if let Some(pw) = guard.as_mut() {
+                    pw.listeners.remove(&pid);
+                  }
+                }
               }
             }
           }
