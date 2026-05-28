@@ -97,6 +97,7 @@ pub fn render_procs(
     y_cursor += 1;
 
     if proc.expanded {
+      let parent_is_up = proc.is_up();
       for (ci, child) in proc.children.iter().enumerate() {
         if y_cursor >= y_max {
           break;
@@ -109,7 +110,7 @@ pub fn render_procs(
         };
         let child_selected = proc_idx == state.selected()
           && proc.focused_child == Some(ci);
-        render_child_row(grid, row_area, child, child_selected);
+        render_child_row(grid, row_area, child, child_selected, parent_is_up);
         y_cursor += 1;
       }
     }
@@ -187,6 +188,7 @@ fn render_child_row(
   area: Rect,
   child: &ProcChild,
   selected: bool,
+  parent_is_up: bool,
 ) {
   let attrs = if selected {
     Attrs::default().bg(Color::Idx(240))
@@ -222,7 +224,7 @@ fn render_child_row(
   row_area.x += r.width;
   row_area.width = row_area.width.saturating_sub(r.width);
 
-  let (text, pill_attrs) = status_pill_for_child(child, attrs);
+  let (text, pill_attrs) = status_pill_for_child(child, attrs, parent_is_up);
   draw_right_aligned_pill(grid, row_area, &text, pill_attrs, attrs);
 }
 
@@ -290,11 +292,26 @@ fn status_pill_for_proc<'a>(
 fn status_pill_for_child<'a>(
   child: &ProcChild,
   mut base: Attrs,
+  parent_is_up: bool,
 ) -> (Cow<'a, str>, Attrs) {
   // displayed_status applies the RUN-flicker debounce — a check that
   // transitions Running → LastExit faster than the debounce window
   // keeps showing its previous stable pill rather than blinking RUN.
-  match child.displayed_status() {
+  let s = child.displayed_status();
+  // When the parent proc isn't up the per-child task is no longer
+  // ticking (HealthRunner is dropped on Exited), so whatever pill we'd
+  // render is a frozen last-run result, not live state. Show it muted
+  // (gray, non-bold) so the user can tell it isn't trustworthy.
+  if !parent_is_up {
+    let symbol = match s {
+      ChildStatus::Idle => " — ",
+      ChildStatus::Running => " ? ",
+      ChildStatus::LastExit(0) => " ✓ ",
+      ChildStatus::LastExit(_) => " ✗ ",
+    };
+    return (Cow::from(symbol), base.fg(Color::BRIGHT_BLACK));
+  }
+  match s {
     ChildStatus::Idle => (Cow::from(" — "), base.fg(Color::BRIGHT_BLACK)),
     ChildStatus::Running => (
       Cow::from(" RUN "),
