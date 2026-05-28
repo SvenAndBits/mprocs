@@ -148,8 +148,10 @@ fn render_screen(
           }
         }
       } else {
-        // Out of bounds.
-        to_cell.set_str("?");
+        // Out of bounds — the VT is smaller than the displayed area
+        // (typical for the small per-hook/per-check child VTs when the
+        // term pane is taller than CHILD_VT_HEIGHT). Render blank.
+        to_cell.set_str(" ");
       }
     }
   }

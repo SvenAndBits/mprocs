@@ -275,19 +275,42 @@ fn status_pill_for_child<'a>(
   }
 }
 
+/// What a click in the procs sidebar resolved to.
+#[derive(Clone, Copy, Debug)]
+pub enum ClickTarget {
+  Proc(usize),
+  Child { proc_idx: usize, child_idx: usize },
+}
+
 pub fn procs_get_clicked_index(
   area: Rect,
   x: u16,
   y: u16,
   state: &State,
-) -> Option<usize> {
+) -> Option<ClickTarget> {
+  if !procs_check_hit(area, x, y) {
+    return None;
+  }
   let inner = area.inner(1);
-  if procs_check_hit(area, x, y) {
-    let index = y - inner.y;
-    let scroll = (state.selected() + 1).saturating_sub(inner.height as usize);
-    let index = index as usize + scroll;
-    if index < state.procs.len() {
-      return Some(index);
+  // The renderer walks state.procs in visible_range() order, emitting one
+  // row per proc plus child rows for expanded procs immediately
+  // afterwards. Re-derive the same layout to map click-y → target.
+  let scroll = (state.selected() + 1).saturating_sub(inner.height as usize);
+  let target_offset = y.saturating_sub(inner.y) as usize;
+  let mut cursor = 0usize;
+  for (proc_idx, proc) in state.procs.iter().enumerate().skip(scroll) {
+    if cursor == target_offset {
+      return Some(ClickTarget::Proc(proc_idx));
+    }
+    cursor += 1;
+    if !proc.expanded {
+      continue;
+    }
+    for child_idx in 0..proc.children.len() {
+      if cursor == target_offset {
+        return Some(ClickTarget::Child { proc_idx, child_idx });
+      }
+      cursor += 1;
     }
   }
   None

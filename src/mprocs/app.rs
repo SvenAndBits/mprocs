@@ -43,7 +43,7 @@ use crate::{
     },
     state::{Scope, State},
     ui_keymap::render_keymap,
-    ui_procs::{procs_check_hit, procs_get_clicked_index, render_procs},
+    ui_procs::{ClickTarget, procs_check_hit, procs_get_clicked_index, render_procs},
     ui_term::{render_term, term_check_hit},
     ui_zoom_tip::render_zoom_tip,
     widgets::list::ListState,
@@ -537,13 +537,28 @@ impl App {
           match mouse_event.kind {
             MouseEventKind::Down(btn) => match btn {
               MouseButton::Left => {
-                if let Some(index) = procs_get_clicked_index(
+                if let Some(target) = procs_get_clicked_index(
                   layout.procs.into(),
                   mouse_event.x as u16,
                   mouse_event.y as u16,
                   &self.state,
                 ) {
-                  self.state.select_proc(index);
+                  match target {
+                    ClickTarget::Proc(idx) => {
+                      if let Some(p) = self.state.procs.get_mut(idx) {
+                        p.focused_child = None;
+                      }
+                      self.state.select_proc(idx);
+                    }
+                    ClickTarget::Child { proc_idx, child_idx } => {
+                      self.state.select_proc(proc_idx);
+                      if let Some(p) =
+                        self.state.procs.get_mut(proc_idx)
+                      {
+                        p.focused_child = Some(child_idx);
+                      }
+                    }
+                  }
                 }
               }
               MouseButton::Right | MouseButton::Middle => (),
