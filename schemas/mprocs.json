@@ -47,6 +47,13 @@
         "$ref": "#/definitions/healthCheckDef"
       }
     },
+    "hooks": {
+      "type": "object",
+      "description": "Named, reusable lifecycle hooks. Each entry is referenced by name from a proc's `hooks` block (e.g. `hooks: { started: my-named-hook }`), or the hook can be inlined directly.",
+      "additionalProperties": {
+        "$ref": "#/definitions/hookDef"
+      }
+    },
     "on_all_finished": {
       "$ref": "#/definitions/appEvent",
       "description": "Event to fire when all processes have finished."
@@ -211,13 +218,13 @@
             },
             "hooks": {
               "type": "object",
-              "description": "Lifecycle hooks. Each hook runs a shell command at the named transition. Blocking by default; set `async: true` to detach.\n\nEvents:\n  - `started`: after the subprocess is spawned (a blocking hook here can abort the lifecycle by exiting non-zero before the proc is reported as up).\n  - `running`: after all health checks have passed AND before dependent procs are started. A blocking failure here keeps the proc Unhealthy and suppresses the dep cascade.\n  - `unhealthy`: when health checks have failed past their retries.\n  - `stopped`: after the subprocess exits.\n  - `failed`: when a blocking hook itself fails.",
+              "description": "Lifecycle hooks. Each hook runs a shell command at the named transition. Blocking by default; set `async: true` to detach.\n\nValue per event is either a string (reference to the top-level `hooks:` registry) or an inline mapping with `cmd:`.\n\nEvents:\n  - `started`: after the subprocess is spawned (a blocking hook here can abort the lifecycle by exiting non-zero before the proc is reported as up).\n  - `running`: after all health checks have passed AND before dependent procs are started. A blocking failure here keeps the proc Unhealthy and suppresses the dep cascade.\n  - `unhealthy`: when health checks have failed past their retries.\n  - `stopped`: after the subprocess exits.\n  - `failed`: when a blocking hook itself fails.\n\nHook commands inherit the proc's full environment (mprocs's env + per-proc `env:` overrides + `add_path:` effects), and `%VAR%` substitution applies just as for the proc's `shell:`.",
               "properties": {
-                "started": { "$ref": "#/definitions/hookDef" },
-                "running": { "$ref": "#/definitions/hookDef" },
-                "unhealthy": { "$ref": "#/definitions/hookDef" },
-                "stopped": { "$ref": "#/definitions/hookDef" },
-                "failed": { "$ref": "#/definitions/hookDef" }
+                "started": { "$ref": "#/definitions/hookValue" },
+                "running": { "$ref": "#/definitions/hookValue" },
+                "unhealthy": { "$ref": "#/definitions/hookValue" },
+                "stopped": { "$ref": "#/definitions/hookValue" },
+                "failed": { "$ref": "#/definitions/hookValue" }
               },
               "additionalProperties": false
             },
@@ -262,10 +269,22 @@
           "type": "integer",
           "minimum": 1,
           "description": "Consecutive failures (after the start period) before the proc is marked Unhealthy. Default: 3."
+        },
+        "min_passes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Consecutive successful invocations required before this check is considered passing. A failure resets the counter. Default: 1. Bump to require stability (e.g. `min_passes: 3` for Postgres on Docker Desktop)."
         }
       },
       "required": ["cmd"],
       "additionalProperties": false
+    },
+    "hookValue": {
+      "description": "Either a string (reference to the top-level `hooks:` registry) or an inline hook definition.",
+      "oneOf": [
+        { "type": "string" },
+        { "$ref": "#/definitions/hookDef" }
+      ]
     },
     "hookDef": {
       "type": "object",

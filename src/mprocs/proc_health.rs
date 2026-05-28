@@ -23,6 +23,14 @@ pub struct HealthCheckDef {
   pub timeout: Duration,
   pub start_period: Duration,
   pub retries: u32,
+  /// Number of consecutive successful invocations required before this
+  /// check is considered passing. Failure resets the counter. Default: 1
+  /// (a single pass flips the check). Bumping this is the clean way to
+  /// require stability — e.g. Postgres on Docker Desktop can briefly
+  /// answer ready, then refuse the next connection during port-binding
+  /// race; setting `min_passes: 3` forces 3-in-a-row before downstream
+  /// procs are unblocked.
+  pub min_passes: u32,
 }
 
 impl HealthCheckDef {
@@ -34,6 +42,7 @@ impl HealthCheckDef {
       timeout: Duration::from_secs(5),
       start_period: Duration::from_secs(0),
       retries: 3,
+      min_passes: 1,
     }
   }
 
@@ -63,6 +72,9 @@ impl HealthCheckDef {
     }
     if let Some(v) = map.get(&Value::from("retries")) {
       def.retries = v.as_usize()? as u32;
+    }
+    if let Some(v) = map.get(&Value::from("min_passes")) {
+      def.min_passes = (v.as_usize()? as u32).max(1);
     }
     Ok(def)
   }
@@ -168,6 +180,22 @@ impl HookDef {
   }
 }
 
+/// Top-level `hooks:` registry — named hooks reusable across procs. A
+/// per-proc hook event can be either a string (reference to this
+/// registry) or an inline mapping.
+pub type HookRegistry = HashMap<String, HookDef>;
+
+pub fn parse_hook_registry(val: &Val) -> Result<HookRegistry> {
+  let map = val.as_object()?;
+  let mut out = HashMap::with_capacity(map.len());
+  for (k, v) in map {
+    let name = value_to_string(&k)?;
+    let def = HookDef::from_val(&v)?;
+    out.insert(name, def);
+  }
+  Ok(out)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct HookSet {
   pub started: Option<HookDef>,
@@ -189,14 +217,21 @@ impl HookSet {
   }
 }
 
-pub fn parse_hooks(val: &Val) -> Result<HookSet> {
+pub fn parse_hooks(val: &Val, registry: &HookRegistry) -> Result<HookSet> {
   let map = val.as_object()?;
   let mut out = HookSet::default();
   for (k, v) in map {
     let name = value_to_string(&k)?;
     let event = HookEvent::from_str(&name)
       .ok_or_else(|| v.error_at(format!("unknown hook event `{}`", name)))?;
-    let def = HookDef::from_val(&v)?;
+    let def = match v.raw() {
+      Value::String(ref_name) => registry
+        .get(ref_name.as_str())
+        .cloned()
+        .ok_or_else(|| v.error_at(format!("unknown hook `{}`", ref_name)))?,
+      Value::Mapping(_) => HookDef::from_val(&v)?,
+      _ => bail!(v.error_at("hook must be a name (string) or inline mapping")),
+    };
     match event {
       HookEvent::Started => out.started = Some(def),
       HookEvent::Running => out.running = Some(def),

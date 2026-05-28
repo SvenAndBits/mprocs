@@ -50,6 +50,12 @@ pub struct Proc {
   /// proc can run them on any spawn, including restarts).
   vars: std::collections::HashMap<String, String>,
   cwd: Option<std::ffi::OsString>,
+  /// Per-proc env overrides resolved from `cfg.env` + `add_path`, in the
+  /// same shape used to spawn the proc's own subprocess (see
+  /// `From<&ProcConfig> for ProcessSpec`). Threaded into every hook /
+  /// healthcheck invocation so they see the same environment as the
+  /// running proc.
+  env_overrides: super::hooks::EnvOverrides,
   healthchecks: Vec<HealthCheckDef>,
   hooks: HookSet,
   /// Active health-check supervisor for the current instance. `None` when
@@ -241,6 +247,22 @@ fn hook_event_label(event: HookEvent) -> &'static str {
     HookEvent::Stopped => "stopped",
     HookEvent::Failed => "failed",
   }
+}
+
+/// Snapshot the proc's resolved env overrides (cfg.env after add_path
+/// merging) into the shape used by hook/check spawns, applying `%VAR%`
+/// substitution the same way ProcessSpec does for the proc itself.
+fn build_env_overrides(cfg: &ProcConfig) -> super::hooks::EnvOverrides {
+  let mut out: super::hooks::EnvOverrides = Vec::new();
+  if let Some(env) = &cfg.env {
+    for (k, v) in env {
+      let v = v.as_ref().map(|s| {
+        crate::mprocs::proc_health::substitute_vars(s, &cfg.vars)
+      });
+      out.push((k.clone(), v));
+    }
+  }
+  out
 }
 
 fn healthcheck_display_name(
@@ -485,7 +507,14 @@ async fn run_lifecycle_hook(
   if let Some(id) = hook_id {
     ks.send_for_task(id, KernelCommand::TaskStarted);
   }
-  let result = run_hook(hook, &proc.vars, proc.cwd.as_ref(), out_vt).await;
+  let result = run_hook(
+    hook,
+    &proc.vars,
+    proc.cwd.as_ref(),
+    &proc.env_overrides,
+    out_vt,
+  )
+  .await;
   let (ok, exit_code) = match &result {
     Ok(()) => (true, 0u32),
     Err(super::hooks::HookError::ExitCode(c)) => (false, (*c as u32) | 0),
@@ -569,6 +598,7 @@ impl Proc {
 
       vars: cfg.vars.clone(),
       cwd: cfg.cwd.clone(),
+      env_overrides: build_env_overrides(cfg),
       healthchecks: cfg.healthchecks.clone(),
       hooks: cfg.hooks.clone(),
       health_runner: None,
@@ -609,6 +639,7 @@ impl Proc {
         &self.healthchecks,
         &self.vars,
         self.cwd.as_ref(),
+        &self.env_overrides,
         &out_vts,
         &self.check_task_ids,
         &ks,
@@ -941,9 +972,10 @@ impl Proc {
           );
           let timeout = def.timeout;
           let ks = self.ks.clone();
+          let env = self.env_overrides.clone();
           tokio::spawn(async move {
             crate::mprocs::proc::health::run_check_once_manual(
-              cmd, cwd, timeout, out_vt, task_id, ks,
+              cmd, cwd, env, timeout, out_vt, task_id, ks,
             )
             .await;
           });

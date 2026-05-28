@@ -26,24 +26,31 @@ pub enum HookError {
   IoError(String),
 }
 
+/// (key, Some(value)) sets the env var on the child; (key, None) removes
+/// any inherited value. Mirrors how mprocs already applies per-proc `env:`
+/// to the proc's own subprocess (see `From<&ProcConfig> for ProcessSpec`).
+pub type EnvOverrides = Vec<(String, Option<String>)>;
+
 pub async fn run_hook(
   hook: &HookDef,
   vars: &HashMap<String, String>,
   cwd: Option<&OsString>,
+  env: &EnvOverrides,
   out_vt: Option<SharedVt>,
 ) -> HookResult {
   let cmd_str = substitute_vars(&hook.cmd, vars);
   let cwd = cwd.cloned();
+  let env_clone = env.clone();
   write_banner(out_vt.as_ref(), &cmd_str);
   if hook.async_ {
     // Fire-and-forget. Detach a tokio task.
     let vt_for_task = out_vt.clone();
     tokio::spawn(async move {
-      let _ = exec_shell(&cmd_str, cwd.as_ref(), vt_for_task).await;
+      let _ = exec_shell(&cmd_str, cwd.as_ref(), &env_clone, vt_for_task).await;
     });
     return Ok(());
   }
-  match exec_shell(&cmd_str, cwd.as_ref(), out_vt).await {
+  match exec_shell(&cmd_str, cwd.as_ref(), env, out_vt).await {
     Ok(code) if code == 0 => Ok(()),
     Ok(code) => Err(HookError::ExitCode(code)),
     Err(e) => Err(HookError::IoError(e)),
@@ -78,6 +85,7 @@ fn chrono_like_now() -> String {
 async fn exec_shell(
   cmd: &str,
   cwd: Option<&OsString>,
+  env: &EnvOverrides,
   out_vt: Option<SharedVt>,
 ) -> Result<i32, String> {
   #[cfg(windows)]
@@ -94,6 +102,16 @@ async fn exec_shell(
   };
   if let Some(d) = cwd {
     command.current_dir(d);
+  }
+  for (k, v) in env {
+    match v {
+      Some(val) => {
+        command.env(k, val);
+      }
+      None => {
+        command.env_remove(k);
+      }
+    }
   }
   let capture = out_vt.is_some();
   command.stdin(std::process::Stdio::null());

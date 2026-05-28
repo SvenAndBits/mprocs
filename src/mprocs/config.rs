@@ -10,8 +10,8 @@ use crate::mprocs::{
   event::AppEvent,
   proc::StopSignal,
   proc_health::{
-    HealthCheckDef, HealthCheckRegistry, HookSet, parse_hooks, parse_proc_healthchecks,
-    parse_registry, substitute_vars,
+    HealthCheckDef, HealthCheckRegistry, HookRegistry, HookSet, parse_hook_registry, parse_hooks,
+    parse_proc_healthchecks, parse_registry, substitute_vars,
   },
   proc_log_config::LogConfig,
   settings::Settings,
@@ -40,6 +40,7 @@ fn resolve_config_path(path: &str, ctx: &ConfigContext) -> Result<PathBuf> {
 pub struct Config {
   pub procs: Vec<ProcConfig>,
   pub healthchecks: HealthCheckRegistry,
+  pub hooks: HookRegistry,
   pub server: Option<ServerConfig>,
   pub exec: Option<AppEvent>,
   pub hide_keymap_window: bool,
@@ -68,6 +69,12 @@ impl Config {
         HealthCheckRegistry::new()
       };
 
+    let hooks_registry = if let Some(v) = config.get(&Value::from("hooks")) {
+      parse_hook_registry(v)?
+    } else {
+      HookRegistry::new()
+    };
+
     let procs = if let Some(procs) = config.get(&Value::from("procs")) {
       let procs = procs
         .as_object()?
@@ -80,6 +87,7 @@ impl Config {
             proc,
             ctx,
             &healthchecks,
+            &hooks_registry,
           )
         })
         .collect::<Result<Vec<_>>>()?
@@ -125,6 +133,7 @@ impl Config {
     let config = Config {
       procs,
       healthchecks,
+      hooks: hooks_registry,
       server,
       exec: None,
       hide_keymap_window: settings.hide_keymap_window,
@@ -144,6 +153,7 @@ impl Config {
     Ok(Self {
       procs: Vec::new(),
       healthchecks: HealthCheckRegistry::new(),
+      hooks: HookRegistry::new(),
       server: None,
       exec: None,
       hide_keymap_window: settings.hide_keymap_window,
@@ -181,6 +191,7 @@ pub struct ProcConfig {
 }
 
 impl ProcConfig {
+  #[allow(clippy::too_many_arguments)]
   fn from_val(
     name: String,
     mouse_scroll_speed: usize,
@@ -188,6 +199,7 @@ impl ProcConfig {
     val: Val,
     ctx: &ConfigContext,
     hc_registry: &HealthCheckRegistry,
+    hook_registry: &HookRegistry,
   ) -> Result<Option<ProcConfig>> {
     match val.raw() {
       Value::Null => Ok(None),
@@ -400,7 +412,7 @@ impl ProcConfig {
           };
 
         let hooks = if let Some(v) = map.get(&Value::from("hooks")) {
-          parse_hooks(v)?
+          parse_hooks(v, hook_registry)?
         } else {
           HookSet::default()
         };
@@ -559,6 +571,47 @@ procs:
       Err(e) => e,
     };
     assert!(err.to_string().contains("does_not_exist"));
+  }
+
+  #[test]
+  fn parses_min_passes_on_healthcheck() {
+    let cfg = parse(
+      r#"
+healthchecks:
+  is_stable:
+    cmd: "true"
+    min_passes: 3
+procs:
+  api:
+    shell: "x"
+    healthchecks: [is_stable]
+"#,
+    )
+    .expect("parse");
+    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
+    assert_eq!(p.healthchecks[0].min_passes, 3);
+  }
+
+  #[test]
+  fn parses_top_level_hook_registry_with_ref() {
+    let cfg = parse(
+      r#"
+hooks:
+  reset-marker:
+    cmd: "rm -f .ready"
+procs:
+  api:
+    shell: "x"
+    hooks:
+      started: reset-marker
+      stopped:
+        cmd: "echo bye"
+"#,
+    )
+    .expect("parse");
+    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
+    assert_eq!(p.hooks.started.as_ref().unwrap().cmd, "rm -f .ready");
+    assert_eq!(p.hooks.stopped.as_ref().unwrap().cmd, "echo bye");
   }
 
   #[test]

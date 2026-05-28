@@ -51,7 +51,9 @@ enum CheckState {
 struct PerCheck {
   state: CheckState,
   consecutive_fails: u32,
+  consecutive_passes: u32,
   retries: u32,
+  min_passes: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,11 +81,16 @@ impl HealthRunner {
   /// child tasks (parallel to `checks`). Each per-check tokio task emits
   /// TaskStarted before its command and TaskStopped(exit_code) after,
   /// driving the UI's per-check status pill.
+  ///
+  /// `env` is the proc's full set of env overrides — applied to each
+  /// check-command spawn so checks see the same env the running proc
+  /// sees (mprocs's inherited env + any per-proc `env:` mods).
   #[allow(clippy::too_many_arguments)]
   pub fn spawn(
     checks: &[HealthCheckDef],
     vars: &HashMap<String, String>,
     cwd: Option<&std::ffi::OsString>,
+    env: &super::hooks::EnvOverrides,
     out_vts: &[Option<SharedVt>],
     check_task_ids: &[TaskId],
     ks: &TaskContext,
@@ -96,7 +103,9 @@ impl HealthRunner {
       per_check.push(PerCheck {
         state: CheckState::Starting,
         consecutive_fails: 0,
+        consecutive_passes: 0,
         retries: def.retries.max(1),
+        min_passes: def.min_passes.max(1),
       });
       let cmd = substitute_vars(&def.cmd, vars);
       let cwd = cwd.cloned();
@@ -107,11 +116,13 @@ impl HealthRunner {
       let out_vt = out_vts.get(idx).cloned().flatten();
       let task_id = check_task_ids.get(idx).copied();
       let ks_clone = ks.clone();
+      let env_clone = env.clone();
       let handle = tokio::spawn(async move {
         run_check_loop(
           idx,
           cmd,
           cwd,
+          env_clone,
           interval,
           timeout,
           start_period,
@@ -159,7 +170,13 @@ impl HealthRunner {
           None => return AggregateOutcome::Noop,
         };
         pc.consecutive_fails = 0;
-        let was = pc.state;
+        pc.consecutive_passes = pc.consecutive_passes.saturating_add(1);
+        // A check is "passing" only once it has racked up `min_passes`
+        // successes in a row. Default is 1 so the typical case is
+        // unchanged.
+        if pc.consecutive_passes < pc.min_passes {
+          return AggregateOutcome::Noop;
+        }
         pc.state = CheckState::Passing;
         // Maybe overall is now healthy?
         if self.per_check.iter().all(|p| p.state == CheckState::Passing) {
@@ -172,7 +189,6 @@ impl HealthRunner {
             OverallState::Healthy => return AggregateOutcome::Noop,
           }
         }
-        let _ = was;
         AggregateOutcome::Noop
       }
       HealthEvent::Fail(idx) => {
@@ -180,6 +196,7 @@ impl HealthRunner {
           Some(p) => p,
           None => return AggregateOutcome::Noop,
         };
+        pc.consecutive_passes = 0;
         pc.consecutive_fails = pc.consecutive_fails.saturating_add(1);
         // During the start_period the check loop sends Pass only on
         // success — failures within the start_period are suppressed there.
@@ -219,6 +236,7 @@ async fn run_check_loop(
   idx: usize,
   cmd: String,
   cwd: Option<std::ffi::OsString>,
+  env: super::hooks::EnvOverrides,
   interval: Duration,
   timeout: Duration,
   start_period: Duration,
@@ -241,7 +259,7 @@ async fn run_check_loop(
     if let Some(id) = task_id {
       ks.send_for_task(id, KernelCommand::TaskStarted);
     }
-    let result = run_check_once(&cmd, cwd.as_ref(), timeout, out_vt.as_ref()).await;
+    let result = run_check_once(&cmd, cwd.as_ref(), &env, timeout, out_vt.as_ref()).await;
     write_result(out_vt.as_ref(), &result, in_start_period);
     if let Some(id) = task_id {
       let exit = match result {
@@ -276,6 +294,7 @@ async fn run_check_loop(
 pub async fn run_check_once_manual(
   cmd: String,
   cwd: Option<std::ffi::OsString>,
+  env: super::hooks::EnvOverrides,
   timeout: Duration,
   out_vt: Option<SharedVt>,
   task_id: Option<TaskId>,
@@ -285,7 +304,7 @@ pub async fn run_check_once_manual(
   if let Some(id) = task_id {
     ks.send_for_task(id, KernelCommand::TaskStarted);
   }
-  let result = run_check_once(&cmd, cwd.as_ref(), timeout, out_vt.as_ref()).await;
+  let result = run_check_once(&cmd, cwd.as_ref(), &env, timeout, out_vt.as_ref()).await;
   write_result(out_vt.as_ref(), &result, false);
   if let Some(id) = task_id {
     let exit = match result {
@@ -346,6 +365,7 @@ fn compact_time() -> String {
 async fn run_check_once(
   cmd: &str,
   cwd: Option<&std::ffi::OsString>,
+  env: &super::hooks::EnvOverrides,
   timeout: Duration,
   out_vt: Option<&SharedVt>,
 ) -> Result<bool, ()> {
@@ -363,6 +383,16 @@ async fn run_check_once(
   };
   if let Some(d) = cwd {
     command.current_dir(d);
+  }
+  for (k, v) in env {
+    match v {
+      Some(val) => {
+        command.env(k, val);
+      }
+      None => {
+        command.env_remove(k);
+      }
+    }
   }
   let capture = out_vt.is_some();
   command.stdin(std::process::Stdio::null());
