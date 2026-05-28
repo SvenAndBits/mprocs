@@ -1261,10 +1261,18 @@ fn update_child_status(
   task_id: TaskId,
   status: crate::mprocs::proc::children::ChildStatus,
 ) -> bool {
+  use crate::mprocs::proc::children::ChildStatus;
   for proc in procs.iter_mut() {
     for child in proc.children.iter_mut() {
       if child.task_id == task_id {
+        // Track `last_stable_status` for the RUN-flicker debounce —
+        // any non-Running status is "stable"; Running is a transient
+        // we may want to suppress visually.
+        if !matches!(status, ChildStatus::Running) {
+          child.last_stable_status = status;
+        }
         child.status = status;
+        child.status_changed_at = Some(std::time::Instant::now());
         return true;
       }
     }

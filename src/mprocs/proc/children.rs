@@ -6,6 +6,7 @@
 //! and healthcheck command invocations.
 
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use crate::kernel::kernel_message::SharedVt;
 use crate::kernel::task::TaskId;
@@ -55,6 +56,38 @@ pub struct ProcChild {
   pub name: String,
   pub vt: SharedVt,
   pub status: ChildStatus,
+  /// Most recent non-Running status. Used by the UI to suppress
+  /// brief RUN flickers on fast checks (Running → LastExit in <300ms)
+  /// by continuing to show the previous stable pill.
+  pub last_stable_status: ChildStatus,
+  /// When the current status was set. Used together with
+  /// `last_stable_status` for the debounce above — if status is
+  /// Running and changed_at is fresh (< debounce window), the UI
+  /// renders `last_stable_status` instead.
+  pub status_changed_at: Option<Instant>,
+}
+
+/// How long a check must have been in `Running` before we actually
+/// render the `RUN` pill. Fast checks (Running→LastExit under this
+/// window) keep showing their previous stable pill to avoid visual
+/// flicker.
+pub const RUN_PILL_DEBOUNCE_MS: u64 = 300;
+
+impl ProcChild {
+  /// What the sidebar should display for this child — applies the
+  /// RUN-flicker debounce.
+  pub fn displayed_status(&self) -> ChildStatus {
+    if matches!(self.status, ChildStatus::Running) {
+      if let Some(changed_at) = self.status_changed_at {
+        if changed_at.elapsed().as_millis()
+          < RUN_PILL_DEBOUNCE_MS as u128
+        {
+          return self.last_stable_status;
+        }
+      }
+    }
+    self.status
+  }
 }
 
 /// Feed bytes into a per-child VT, catching any panic the vt100 parser

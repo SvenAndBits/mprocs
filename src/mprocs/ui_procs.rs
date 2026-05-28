@@ -92,7 +92,8 @@ pub fn render_procs(
       width: area.width.saturating_sub(2),
       height: 1,
     };
-    render_proc_row(grid, row_area, proc, proc_selected);
+    let waiting = proc_is_waiting_for_deps(proc, &state.procs);
+    render_proc_row(grid, row_area, proc, proc_selected, waiting);
     y_cursor += 1;
 
     if proc.expanded {
@@ -115,11 +116,39 @@ pub fn render_procs(
   }
 }
 
+/// True when a proc hasn't started yet AND at least one of its declared
+/// deps isn't Running yet. The kernel suppresses the proc's Start
+/// command in that case, so it sits in NotStarted; we want the sidebar
+/// to show that as "WAITING" rather than the same gray "DOWN" used for
+/// procs the user has stopped.
+fn proc_is_waiting_for_deps(proc: &ProcView, all_procs: &[ProcView]) -> bool {
+  if !matches!(proc.status, TaskStatus::NotStarted) {
+    return false;
+  }
+  if proc.cfg.deps.is_empty() {
+    return false;
+  }
+  for dep_name in &proc.cfg.deps {
+    match all_procs.iter().find(|p| p.cfg.name == *dep_name) {
+      Some(dep) => {
+        if !matches!(dep.status, TaskStatus::Running) {
+          return true;
+        }
+      }
+      // Unknown dep — best guess: treat as not ready so we surface the
+      // misconfig as WAITING rather than silently DOWN.
+      None => return true,
+    }
+  }
+  false
+}
+
 fn render_proc_row(
   grid: &mut Grid,
   area: Rect,
   proc: &ProcView,
   selected: bool,
+  waiting: bool,
 ) {
   let attrs = if selected {
     Attrs::default().bg(Color::Idx(240))
@@ -149,7 +178,7 @@ fn render_proc_row(
   row_area.x += r.width;
   row_area.width = row_area.width.saturating_sub(r.width);
 
-  let (status_text, status_attrs) = status_pill_for_proc(proc, attrs);
+  let (status_text, status_attrs) = status_pill_for_proc(proc, attrs, waiting);
   draw_right_aligned_pill(grid, row_area, &status_text, status_attrs, attrs);
 }
 
@@ -225,6 +254,7 @@ fn draw_right_aligned_pill(
 fn status_pill_for_proc<'a>(
   proc: &ProcView,
   mut base: Attrs,
+  waiting: bool,
 ) -> (Cow<'a, str>, Attrs) {
   if matches!(proc.status, TaskStatus::Starting) {
     return (
@@ -250,6 +280,9 @@ fn status_pill_for_proc<'a>(
       Cow::from(format!(" DOWN ({})", code)),
       base.fg(Color::BRIGHT_RED),
     ),
+    None if waiting => {
+      (Cow::from(" WAITING "), base.fg(Color::BRIGHT_YELLOW))
+    }
     None => (Cow::from(" DOWN "), base.fg(Color::BRIGHT_BLACK)),
   }
 }
@@ -258,7 +291,10 @@ fn status_pill_for_child<'a>(
   child: &ProcChild,
   mut base: Attrs,
 ) -> (Cow<'a, str>, Attrs) {
-  match child.status {
+  // displayed_status applies the RUN-flicker debounce — a check that
+  // transitions Running → LastExit faster than the debounce window
+  // keeps showing its previous stable pill rather than blinking RUN.
+  match child.displayed_status() {
     ChildStatus::Idle => (Cow::from(" — "), base.fg(Color::BRIGHT_BLACK)),
     ChildStatus::Running => (
       Cow::from(" RUN "),

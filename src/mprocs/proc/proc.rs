@@ -146,6 +146,8 @@ pub fn launch_proc(
         name: label.to_string(),
         vt,
         status: ChildStatus::Idle,
+        last_stable_status: ChildStatus::Idle,
+        status_changed_at: None,
       });
     }
   }
@@ -163,6 +165,8 @@ pub fn launch_proc(
       name: label,
       vt,
       status: ChildStatus::Idle,
+      last_stable_status: ChildStatus::Idle,
+      status_changed_at: None,
     });
   }
 
