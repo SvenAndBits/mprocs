@@ -1067,6 +1067,12 @@ impl App {
             }
           }
           loop_action.render();
+        } else if update_child_status(
+          &mut self.state.procs,
+          task_id,
+          crate::mprocs::proc::children::ChildStatus::Running,
+        ) {
+          loop_action.render();
         }
       }
       TaskNotify::StatusChanged(status) => {
@@ -1076,6 +1082,16 @@ impl App {
         }
       }
       TaskNotify::Stopped(exit_code) => {
+        if update_child_status(
+          &mut self.state.procs,
+          task_id,
+          crate::mprocs::proc::children::ChildStatus::LastExit(
+            exit_code as i32,
+          ),
+        ) {
+          loop_action.render();
+          return;
+        }
         if let Some(proc) = self.state.get_proc_mut(task_id) {
           proc.status = TaskStatus::Exited(exit_code);
 
@@ -1201,6 +1217,24 @@ pub async fn server_main(
   app.run().await?;
 
   Ok(())
+}
+
+/// Find a hook/check child by task id across all procs and update its
+/// per-row status. Returns true if a match was found.
+fn update_child_status(
+  procs: &mut [crate::mprocs::proc::view::ProcView],
+  task_id: TaskId,
+  status: crate::mprocs::proc::children::ChildStatus,
+) -> bool {
+  for proc in procs.iter_mut() {
+    for child in proc.children.iter_mut() {
+      if child.task_id == task_id {
+        child.status = status;
+        return true;
+      }
+    }
+  }
+  false
 }
 
 /// Move focus to the next visible row in the sidebar tree.

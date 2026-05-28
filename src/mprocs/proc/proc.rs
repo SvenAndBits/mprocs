@@ -64,6 +64,15 @@ pub struct Proc {
   check_vts: Vec<SharedVt>,
   /// Per-hook-event VTs. Created on demand for events that have a hook.
   hook_vts: std::collections::HashMap<HookEvent, SharedVt>,
+  /// Kernel TaskIds for the registered hook child tasks. Used to emit
+  /// per-hook lifecycle status (TaskStarted before the hook runs,
+  /// TaskStopped(exit_code) after) so the UI sees status pills update.
+  hook_task_ids: std::collections::HashMap<HookEvent, TaskId>,
+  /// Kernel TaskIds for the registered healthcheck child tasks.
+  check_task_ids: Vec<TaskId>,
+  /// Captured kernel context, used to emit per-hook / per-check lifecycle
+  /// events on behalf of the child tasks.
+  ks: TaskContext,
 }
 
 #[derive(Debug)]
@@ -101,8 +110,16 @@ pub fn launch_proc(
     }
   }
 
+  // Register each hook / each check as a kernel child task so the UI and
+  // tools like dekit can address them, and the proc task can report
+  // lifecycle status via send_for_task.
   let mut children: Vec<ProcChild> = Vec::new();
-  // Order: hooks first (small, fixed set), then checks.
+  let mut hook_task_ids: std::collections::HashMap<HookEvent, TaskId> =
+    std::collections::HashMap::new();
+  let mut check_task_ids: Vec<TaskId> = Vec::with_capacity(cfg.healthchecks.len());
+
+  let parent_path_str = path.as_ref().map(|p| p.as_str().to_owned());
+
   for event in [
     HookEvent::Started,
     HookEvent::Running,
@@ -110,23 +127,35 @@ pub fn launch_proc(
     HookEvent::Stopped,
     HookEvent::Failed,
   ] {
-    if let Some(vt) = hook_vts.get(&event) {
+    if let Some(vt) = hook_vts.get(&event).cloned() {
+      let label = hook_event_label(event);
+      let child_path = parent_path_str
+        .as_ref()
+        .and_then(|p| TaskPath::new(format!("{}/hook/{}", p, label)).ok());
+      let child_id = register_child_task(parent_ks, child_path, vt.clone());
+      hook_task_ids.insert(event, child_id);
       children.push(ProcChild {
-        task_id: parent_ks.alloc_id(), // placeholder id; real registration follows
+        task_id: child_id,
         kind: ChildKind::Hook(event),
-        name: hook_event_label(event).to_string(),
-        vt: vt.clone(),
+        name: label.to_string(),
+        vt,
         status: ChildStatus::Idle,
       });
     }
   }
   for (idx, def) in cfg.healthchecks.iter().enumerate() {
     let label = healthcheck_display_name(def, idx);
+    let child_path = parent_path_str
+      .as_ref()
+      .and_then(|p| TaskPath::new(format!("{}/check/{}", p, label)).ok());
+    let vt = check_vts[idx].clone();
+    let child_id = register_child_task(parent_ks, child_path, vt.clone());
+    check_task_ids.push(child_id);
     children.push(ProcChild {
-      task_id: parent_ks.alloc_id(),
+      task_id: child_id,
       kind: ChildKind::Check(idx),
       name: label,
-      vt: check_vts[idx].clone(),
+      vt,
       status: ChildStatus::Idle,
     });
   }
@@ -135,6 +164,8 @@ pub fn launch_proc(
   let task_vt = vt.clone();
   let check_vts_for_task = check_vts.clone();
   let hook_vts_for_task = hook_vts.clone();
+  let hook_task_ids_for_task = hook_task_ids.clone();
+  let check_task_ids_for_task = check_task_ids.clone();
   let child_id = parent_ks.spawn_async_with_id(
     task_id,
     TaskDef {
@@ -155,6 +186,8 @@ pub fn launch_proc(
         task_vt,
         check_vts_for_task,
         hook_vts_for_task,
+        hook_task_ids_for_task,
+        check_task_ids_for_task,
         cmd_receiver,
       )
       .await;
@@ -162,6 +195,42 @@ pub fn launch_proc(
   );
 
   ProcView::new_with_children(child_id, cfg, vt, children)
+}
+
+/// Register a no-op kernel task to host a child's path + VT. The task
+/// does nothing on TaskCmd::{Start,Stop} — it exists purely so the UI
+/// (and ctl/dekit) can address it, and so the parent proc can emit
+/// lifecycle status via `send_for_task`.
+fn register_child_task(
+  parent_ks: &TaskContext,
+  path: Option<TaskPath>,
+  vt: SharedVt,
+) -> TaskId {
+  let id = parent_ks.alloc_id();
+  parent_ks.register_with_id(
+    id,
+    TaskDef {
+      stop_on_quit: false,
+      path,
+      vt: Some(vt),
+      ..Default::default()
+    },
+    Box::new(|_ctx| Box::new(NoopChildTask)),
+  );
+  id
+}
+
+struct NoopChildTask;
+
+impl crate::kernel::task::Task for NoopChildTask {
+  fn handle_cmd(
+    &mut self,
+    _cmd: TaskCmd,
+    _fx: &mut crate::kernel::task::Effects,
+  ) {
+    // Hook/check child tasks don't accept commands. All state is driven
+    // by the parent proc via `send_for_task`.
+  }
 }
 
 fn hook_event_label(event: HookEvent) -> &'static str {
@@ -194,6 +263,8 @@ async fn proc_main_loop(
   vt: SharedVt,
   check_vts: Vec<SharedVt>,
   hook_vts: std::collections::HashMap<HookEvent, SharedVt>,
+  hook_task_ids: std::collections::HashMap<HookEvent, TaskId>,
+  check_task_ids: Vec<TaskId>,
   mut cmd_receiver: UnboundedReceiver<TaskCmd>,
 ) -> ProcView {
   let (internal_sender, mut internal_receiver) =
@@ -206,6 +277,9 @@ async fn proc_main_loop(
     size,
     check_vts,
     hook_vts,
+    hook_task_ids,
+    check_task_ids,
+    ks.clone(),
   )
   .await;
 
@@ -287,7 +361,7 @@ async fn proc_main_loop(
           // Tear down health checks for the dead instance.
           proc.health_runner = None;
           // Run the `stopped` hook if configured (best-effort).
-          run_lifecycle_hook(&proc, HookEvent::Stopped).await;
+          run_lifecycle_hook(&proc, HookEvent::Stopped, &ks).await;
           proc.handle_exited(exit_code);
           if !proc.is_up() {
             ks.send(KernelCommand::TaskStopped(exit_code));
@@ -296,11 +370,11 @@ async fn proc_main_loop(
         ProcEvent::Started => {
           // Run the `started` hook (blocking by default — failure flips
           // the proc to a failed state and skips the lifecycle transition).
-          let hook_ok = run_lifecycle_hook(&proc, HookEvent::Started).await;
+          let hook_ok = run_lifecycle_hook(&proc, HookEvent::Started, &ks).await;
           if !hook_ok {
             // Treat hook failure as a process failure: kill and report.
             log::warn!("started hook failed; killing proc");
-            run_lifecycle_hook(&proc, HookEvent::Failed).await;
+            run_lifecycle_hook(&proc, HookEvent::Failed, &ks).await;
             proc.kill().await;
             // The subsequent ProcEvent::Exited will report Stopped.
             continue;
@@ -321,13 +395,13 @@ async fn proc_main_loop(
           // proc is marked Unhealthy and the cascade is suppressed —
           // dependents won't see a green light they can't trust.
           let hook_ok =
-            run_lifecycle_hook(&proc, HookEvent::Running).await;
+            run_lifecycle_hook(&proc, HookEvent::Running, &ks).await;
           if !hook_ok {
             log::warn!(
               "`running` hook failed for proc `{}`; staying Unhealthy",
               proc.name
             );
-            run_lifecycle_hook(&proc, HookEvent::Failed).await;
+            run_lifecycle_hook(&proc, HookEvent::Failed, &ks).await;
             ks.send(KernelCommand::TaskStatusChanged(TaskStatus::Unhealthy));
             continue;
           }
@@ -341,7 +415,7 @@ async fn proc_main_loop(
         }
         AggregateOutcome::BecameUnhealthy => {
           ks.send(KernelCommand::TaskStatusChanged(TaskStatus::Unhealthy));
-          run_lifecycle_hook(&proc, HookEvent::Unhealthy).await;
+          run_lifecycle_hook(&proc, HookEvent::Unhealthy, &ks).await;
         }
         AggregateOutcome::Noop => {}
       },
@@ -395,26 +469,47 @@ async fn proc_main_loop(
 /// only when a *blocking* hook failed (the caller can then treat that as a
 /// proc failure). Returns `true` if no hook is configured, the hook ran
 /// successfully, or the hook is async.
-async fn run_lifecycle_hook(proc: &Proc, event: HookEvent) -> bool {
+async fn run_lifecycle_hook(
+  proc: &Proc,
+  event: HookEvent,
+  ks: &TaskContext,
+) -> bool {
   let hook = match proc.hooks.get(event) {
     Some(h) => h,
     None => return true,
   };
   let async_ = hook.async_;
   let out_vt = proc.hook_vts.get(&event).cloned();
-  match run_hook(hook, &proc.vars, proc.cwd.as_ref(), out_vt).await {
-    Ok(()) => true,
-    Err(err) => {
-      log::warn!(
-        "hook `{:?}` for proc `{}` failed: {:?}",
-        event,
-        proc.name,
-        err
-      );
-      // Async hook failures are advisory; only blocking failures abort the
-      // lifecycle transition.
-      async_
-    }
+  let hook_id = proc.hook_task_ids.get(&event).copied();
+
+  if let Some(id) = hook_id {
+    ks.send_for_task(id, KernelCommand::TaskStarted);
+  }
+  let result = run_hook(hook, &proc.vars, proc.cwd.as_ref(), out_vt).await;
+  let (ok, exit_code) = match &result {
+    Ok(()) => (true, 0u32),
+    Err(super::hooks::HookError::ExitCode(c)) => (false, (*c as u32) | 0),
+    Err(super::hooks::HookError::IoError(_)) => (false, 254u32),
+  };
+  if let Some(id) = hook_id {
+    // Async hooks don't have a real exit code from this call's POV — the
+    // detached future hasn't finished yet — but we still want the pill to
+    // flip from RUN to either ✓ or ✗ in the UI, so report 0 and trust
+    // best-effort.
+    ks.send_for_task(id, KernelCommand::TaskStopped(exit_code));
+  }
+  if ok {
+    true
+  } else {
+    log::warn!(
+      "hook `{:?}` for proc `{}` failed: {:?}",
+      event,
+      proc.name,
+      result.err()
+    );
+    // Async hook failures are advisory; only blocking failures abort the
+    // lifecycle transition.
+    async_
   }
 }
 
@@ -440,6 +535,7 @@ async fn apply_screen_effects(
 }
 
 impl Proc {
+  #[allow(clippy::too_many_arguments)]
   pub async fn new(
     id: TaskId,
     cfg: &ProcConfig,
@@ -448,6 +544,9 @@ impl Proc {
     area: Rect,
     check_vts: Vec<SharedVt>,
     hook_vts: std::collections::HashMap<HookEvent, SharedVt>,
+    hook_task_ids: std::collections::HashMap<HookEvent, TaskId>,
+    check_task_ids: Vec<TaskId>,
+    ks: TaskContext,
   ) -> Self {
     let size = Size {
       width: area.width,
@@ -476,6 +575,9 @@ impl Proc {
       reported_running: false,
       check_vts,
       hook_vts,
+      hook_task_ids,
+      check_task_ids,
+      ks,
     };
 
     if cfg.autostart {
@@ -498,6 +600,7 @@ impl Proc {
   /// Reset per-instance health state, called whenever a new process is
   /// spawned (initial start or restart).
   fn reset_health_state(&mut self) {
+    let ks = self.ks.clone();
     self.reported_running = false;
     if self.has_healthchecks() {
       let out_vts: Vec<Option<SharedVt>> =
@@ -507,6 +610,8 @@ impl Proc {
         &self.vars,
         self.cwd.as_ref(),
         &out_vts,
+        &self.check_task_ids,
+        &ks,
       ));
     } else {
       self.health_runner = None;

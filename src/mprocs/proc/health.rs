@@ -17,7 +17,8 @@ use tokio::sync::mpsc::{
 };
 use tokio::task::JoinHandle;
 
-use crate::kernel::kernel_message::SharedVt;
+use crate::kernel::kernel_message::{KernelCommand, SharedVt, TaskContext};
+use crate::kernel::task::TaskId;
 use crate::mprocs::proc_health::{HealthCheckDef, substitute_vars};
 
 #[derive(Debug)]
@@ -74,11 +75,18 @@ pub struct HealthRunner {
 impl HealthRunner {
   /// Spawn one tokio task per check. The runner's `next` future yields
   /// aggregate state transitions for the proc to react to.
+  /// `check_task_ids` are the kernel TaskIds for the registered check
+  /// child tasks (parallel to `checks`). Each per-check tokio task emits
+  /// TaskStarted before its command and TaskStopped(exit_code) after,
+  /// driving the UI's per-check status pill.
+  #[allow(clippy::too_many_arguments)]
   pub fn spawn(
     checks: &[HealthCheckDef],
     vars: &HashMap<String, String>,
     cwd: Option<&std::ffi::OsString>,
     out_vts: &[Option<SharedVt>],
+    check_task_ids: &[TaskId],
+    ks: &TaskContext,
   ) -> Self {
     let (tx, rx) = unbounded_channel::<HealthEvent>();
     let mut per_check = Vec::with_capacity(checks.len());
@@ -97,6 +105,8 @@ impl HealthRunner {
       let start_period = def.start_period;
       let tx_clone = tx.clone();
       let out_vt = out_vts.get(idx).cloned().flatten();
+      let task_id = check_task_ids.get(idx).copied();
+      let ks_clone = ks.clone();
       let handle = tokio::spawn(async move {
         run_check_loop(
           idx,
@@ -107,6 +117,8 @@ impl HealthRunner {
           start_period,
           tx_clone,
           out_vt,
+          task_id,
+          ks_clone,
         )
         .await;
       });
@@ -202,6 +214,7 @@ impl Drop for HealthRunner {
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_check_loop(
   idx: usize,
   cmd: String,
@@ -211,6 +224,8 @@ async fn run_check_loop(
   start_period: Duration,
   tx: UnboundedSender<HealthEvent>,
   out_vt: Option<SharedVt>,
+  task_id: Option<TaskId>,
+  ks: TaskContext,
 ) {
   let started = Instant::now();
   let mut ticker = tokio::time::interval(interval);
@@ -223,8 +238,19 @@ async fn run_check_loop(
     let in_start_period = started.elapsed() < start_period;
 
     write_banner(out_vt.as_ref(), &cmd);
+    if let Some(id) = task_id {
+      ks.send_for_task(id, KernelCommand::TaskStarted);
+    }
     let result = run_check_once(&cmd, cwd.as_ref(), timeout, out_vt.as_ref()).await;
     write_result(out_vt.as_ref(), &result, in_start_period);
+    if let Some(id) = task_id {
+      let exit = match result {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(()) => 254,
+      };
+      ks.send_for_task(id, KernelCommand::TaskStopped(exit));
+    }
     let event = match result {
       Ok(true) => HealthEvent::Pass(idx),
       _ => {
