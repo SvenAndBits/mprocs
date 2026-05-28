@@ -25,6 +25,9 @@ pub enum AppEvent {
   NextProc,
   PrevProc,
   SelectProc { index: usize },
+  /// Expand or collapse the hooks/checks tree under the currently selected
+  /// proc (sidebar tree-view).
+  ToggleProcChildren,
   StartProc,
   TermProc,
   KillProc,
@@ -75,6 +78,7 @@ impl AppEvent {
       AppEvent::NextProc => "Next".to_string(),
       AppEvent::PrevProc => "Prev".to_string(),
       AppEvent::SelectProc { index } => format!("Select process #{}", index),
+      AppEvent::ToggleProcChildren => "Toggle hooks/checks tree".to_string(),
       AppEvent::StartProc => "Start".to_string(),
       AppEvent::TermProc => "Stop".to_string(),
       AppEvent::KillProc => "Kill".to_string(),

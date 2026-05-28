@@ -196,6 +196,16 @@ impl Settings {
       Key::new(KeyCode::Char('k'), KeyMods::NONE),
       AppEvent::PrevProc,
     );
+    // Tab / Space: expand or collapse the hooks/checks tree under the
+    // currently selected proc.
+    s.keymap_add_p(
+      Key::new(KeyCode::Tab, KeyMods::NONE),
+      AppEvent::ToggleProcChildren,
+    );
+    s.keymap_add_p(
+      Key::new(KeyCode::Char(' '), KeyMods::NONE),
+      AppEvent::ToggleProcChildren,
+    );
     s.keymap_add_p(
       Key::new(KeyCode::Char('s'), KeyMods::NONE),
       AppEvent::StartProc,

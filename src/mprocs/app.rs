@@ -678,6 +678,14 @@ impl App {
         self.state.select_proc(*index);
         loop_action.render();
       }
+      AppEvent::ToggleProcChildren => {
+        if let Some(proc) = self.state.get_current_proc_mut() {
+          if !proc.children.is_empty() {
+            proc.expanded = !proc.expanded;
+            loop_action.render();
+          }
+        }
+      }
 
       AppEvent::StartProc => {
         if let Some(proc) = self.state.get_current_proc_mut() {

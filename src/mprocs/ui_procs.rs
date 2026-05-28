@@ -2,8 +2,11 @@ use std::borrow::Cow;
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::kernel::task::TaskStatus;
 use crate::mprocs::{
   config::Config,
+  proc::children::{ChildKind, ChildStatus, ProcChild},
+  proc::view::ProcView,
   state::{Scope, State},
 };
 use crate::term::{
@@ -63,75 +66,200 @@ pub fn render_procs(
     );
   }
 
+  // Render: walk the proc list, emit one row per proc, plus child rows
+  // immediately under each expanded proc. We render until we run out of
+  // vertical space; pagination tracks procs (not rows), so selection
+  // stays on the proc the user picked even if children push things down.
+  let inner = area.inner(1);
+  let mut y_cursor = inner.y;
+  let y_max = inner.y + inner.height;
   let range = state.procs_list.visible_range();
-  for (row, index) in range.enumerate() {
-    let proc = if let Some(proc) = state.procs.get(index) {
-      proc
-    } else {
-      continue;
+  for proc_idx in range {
+    if y_cursor >= y_max {
+      break;
+    }
+    let proc = match state.procs.get(proc_idx) {
+      Some(p) => p,
+      None => continue,
     };
-
-    let selected = index == state.selected();
-    let attrs = if selected {
-      Attrs::default().bg(crate::term::Color::Idx(240))
-    } else {
-      Attrs::default()
-    };
-    let mut row_area = crate::term::grid::Rect {
+    let selected = proc_idx == state.selected();
+    let row_area = Rect {
       x: area.x + 1,
-      y: area.y + 1 + row as u16,
+      y: y_cursor,
       width: area.width.saturating_sub(2),
       height: 1,
     };
+    render_proc_row(grid, row_area, proc, selected);
+    y_cursor += 1;
 
-    let r = grid.draw_text(row_area, if selected { "•" } else { " " }, attrs);
-    row_area.x += r.width;
-    row_area.width = row_area.width.saturating_sub(r.width);
-
-    let r = grid.draw_text(row_area, proc.name(), attrs);
-    row_area.x += r.width;
-    row_area.width = row_area.width.saturating_sub(r.width);
-
-    let (status_text, status_attrs) = if proc.is_starting() {
-      (
-        Cow::from(" STARTING "),
-        attrs.clone().set_bold(true).fg(Color::BRIGHT_YELLOW),
-      )
-    } else if proc.is_unhealthy() {
-      (
-        Cow::from(" UNHEALTHY "),
-        attrs.clone().set_bold(true).fg(Color::BRIGHT_RED),
-      )
-    } else if proc.is_up() {
-      (
-        Cow::from(" UP "),
-        attrs.clone().set_bold(true).fg(Color::BRIGHT_GREEN),
-      )
-    } else {
-      match proc.exit_code() {
-        Some(0) => {
-          (Cow::from(" DOWN (0)"), attrs.clone().fg(Color::BRIGHT_BLUE))
+    if proc.expanded {
+      for child in &proc.children {
+        if y_cursor >= y_max {
+          break;
         }
-        Some(exit_code) => (
-          Cow::from(format!(" DOWN ({})", exit_code)),
-          attrs.clone().fg(Color::BRIGHT_RED),
-        ),
-        None => (Cow::from(" DOWN "), attrs.clone().fg(Color::BRIGHT_BLACK)),
+        let row_area = Rect {
+          x: area.x + 1,
+          y: y_cursor,
+          width: area.width.saturating_sub(2),
+          height: 1,
+        };
+        render_child_row(grid, row_area, child);
+        y_cursor += 1;
       }
-    };
-    let status_width = status_text.width() as u16;
-    let r = grid.draw_text(
-      Rect {
-        x: row_area.x.max(row_area.x + row_area.width - status_width),
-        width: status_width.min(row_area.width),
-        ..row_area
-      },
-      &status_text,
-      status_attrs,
-    );
-    row_area.width = row_area.width.saturating_sub(r.width);
+    }
+  }
+}
 
-    grid.fill_area(row_area, ' ', attrs);
+fn render_proc_row(
+  grid: &mut Grid,
+  area: Rect,
+  proc: &ProcView,
+  selected: bool,
+) {
+  let attrs = if selected {
+    Attrs::default().bg(Color::Idx(240))
+  } else {
+    Attrs::default()
+  };
+  let mut row_area = area;
+
+  let r = grid.draw_text(row_area, if selected { "•" } else { " " }, attrs);
+  row_area.x += r.width;
+  row_area.width = row_area.width.saturating_sub(r.width);
+
+  let chevron = if !proc.children.is_empty() {
+    if proc.expanded { "▼ " } else { "▶ " }
+  } else {
+    "  "
+  };
+  let r = grid.draw_text(
+    row_area,
+    chevron,
+    attrs.clone().fg(Color::BRIGHT_BLACK),
+  );
+  row_area.x += r.width;
+  row_area.width = row_area.width.saturating_sub(r.width);
+
+  let r = grid.draw_text(row_area, proc.name(), attrs);
+  row_area.x += r.width;
+  row_area.width = row_area.width.saturating_sub(r.width);
+
+  let (status_text, status_attrs) = status_pill_for_proc(proc, attrs);
+  draw_right_aligned_pill(grid, row_area, &status_text, status_attrs, attrs);
+}
+
+fn render_child_row(grid: &mut Grid, area: Rect, child: &ProcChild) {
+  let attrs = Attrs::default();
+  let mut row_area = area;
+
+  // Selection-marker column stays blank for child rows (not selectable in
+  // this iteration).
+  let r = grid.draw_text(row_area, " ", attrs);
+  row_area.x += r.width;
+  row_area.width = row_area.width.saturating_sub(r.width);
+
+  let r = grid.draw_text(
+    row_area,
+    "  ├─ ",
+    attrs.clone().fg(Color::BRIGHT_BLACK),
+  );
+  row_area.x += r.width;
+  row_area.width = row_area.width.saturating_sub(r.width);
+
+  let kind_label = match child.kind {
+    ChildKind::Hook(_) => "hook:",
+    ChildKind::Check(_) => "check:",
+  };
+  let r = grid.draw_text(
+    row_area,
+    kind_label,
+    attrs.clone().fg(Color::BRIGHT_BLACK),
+  );
+  row_area.x += r.width;
+  row_area.width = row_area.width.saturating_sub(r.width);
+  let r = grid.draw_text(row_area, child.name.as_str(), attrs);
+  row_area.x += r.width;
+  row_area.width = row_area.width.saturating_sub(r.width);
+
+  let (text, pill_attrs) = status_pill_for_child(child, attrs);
+  draw_right_aligned_pill(grid, row_area, &text, pill_attrs, attrs);
+}
+
+fn draw_right_aligned_pill(
+  grid: &mut Grid,
+  area: Rect,
+  text: &str,
+  attrs: Attrs,
+  base_attrs: Attrs,
+) {
+  let w = text.width() as u16;
+  grid.draw_text(
+    Rect {
+      x: area.x.max(area.x + area.width - w),
+      width: w.min(area.width),
+      ..area
+    },
+    text,
+    attrs,
+  );
+  let remaining = area.width.saturating_sub(w.min(area.width));
+  let bg_area = Rect {
+    width: remaining,
+    ..area
+  };
+  grid.fill_area(bg_area, ' ', base_attrs);
+}
+
+fn status_pill_for_proc<'a>(
+  proc: &ProcView,
+  mut base: Attrs,
+) -> (Cow<'a, str>, Attrs) {
+  if matches!(proc.status, TaskStatus::Starting) {
+    return (
+      Cow::from(" STARTING "),
+      base.set_bold(true).fg(Color::BRIGHT_YELLOW),
+    );
+  }
+  if matches!(proc.status, TaskStatus::Unhealthy) {
+    return (
+      Cow::from(" UNHEALTHY "),
+      base.set_bold(true).fg(Color::BRIGHT_RED),
+    );
+  }
+  if proc.is_up() {
+    return (
+      Cow::from(" UP "),
+      base.set_bold(true).fg(Color::BRIGHT_GREEN),
+    );
+  }
+  match proc.exit_code() {
+    Some(0) => (Cow::from(" DOWN (0)"), base.fg(Color::BRIGHT_BLUE)),
+    Some(code) => (
+      Cow::from(format!(" DOWN ({})", code)),
+      base.fg(Color::BRIGHT_RED),
+    ),
+    None => (Cow::from(" DOWN "), base.fg(Color::BRIGHT_BLACK)),
+  }
+}
+
+fn status_pill_for_child<'a>(
+  child: &ProcChild,
+  mut base: Attrs,
+) -> (Cow<'a, str>, Attrs) {
+  match child.status {
+    ChildStatus::Idle => (Cow::from(" — "), base.fg(Color::BRIGHT_BLACK)),
+    ChildStatus::Running => (
+      Cow::from(" RUN "),
+      base.set_bold(true).fg(Color::BRIGHT_YELLOW),
+    ),
+    ChildStatus::LastExit(0) => (
+      Cow::from(" ✓ "),
+      base.set_bold(true).fg(Color::BRIGHT_GREEN),
+    ),
+    ChildStatus::LastExit(_) => (
+      Cow::from(" ✗ "),
+      base.set_bold(true).fg(Color::BRIGHT_RED),
+    ),
   }
 }
 
