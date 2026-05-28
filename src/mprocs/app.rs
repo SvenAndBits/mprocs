@@ -705,6 +705,26 @@ impl App {
       }
       AppEvent::RestartProc => {
         if let Some(proc) = self.state.get_current_proc_mut() {
+          // When a hook/check child is focused, `r` re-runs that single
+          // item instead of restarting the whole proc.
+          if let Some(child_idx) = proc.focused_child {
+            if let Some(child) = proc.children.get(child_idx) {
+              use crate::mprocs::proc::children::ChildKind;
+              use crate::mprocs::proc::msg::ProcMsg;
+              let proc_id = proc.id;
+              let cmd = match child.kind {
+                ChildKind::Hook(event) => {
+                  TaskCmd::msg(ProcMsg::RerunHook(event))
+                }
+                ChildKind::Check(idx) => {
+                  TaskCmd::msg(ProcMsg::RerunCheck(idx))
+                }
+              };
+              pc.send(KernelCommand::TaskCmd(proc_id, cmd));
+              loop_action.render();
+              return;
+            }
+          }
           proc.target_state = TargetState::Started;
           if proc.is_up() {
             pc.send(KernelCommand::TaskCmd(proc.id, TaskCmd::Stop));

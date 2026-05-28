@@ -268,6 +268,35 @@ async fn run_check_loop(
   }
 }
 
+/// One-shot run of a healthcheck command, intended for the "press r to
+/// re-run" UI action. Mirrors what the supervisor loop does for a single
+/// tick: writes a banner + result into `out_vt`, emits TaskStarted /
+/// TaskStopped lifecycle events for `task_id`. Does NOT coordinate with
+/// the supervisor — the next supervisor tick still fires independently.
+pub async fn run_check_once_manual(
+  cmd: String,
+  cwd: Option<std::ffi::OsString>,
+  timeout: Duration,
+  out_vt: Option<SharedVt>,
+  task_id: Option<TaskId>,
+  ks: TaskContext,
+) {
+  write_banner(out_vt.as_ref(), &cmd);
+  if let Some(id) = task_id {
+    ks.send_for_task(id, KernelCommand::TaskStarted);
+  }
+  let result = run_check_once(&cmd, cwd.as_ref(), timeout, out_vt.as_ref()).await;
+  write_result(out_vt.as_ref(), &result, false);
+  if let Some(id) = task_id {
+    let exit = match result {
+      Ok(true) => 0,
+      Ok(false) => 1,
+      Err(()) => 254,
+    };
+    ks.send_for_task(id, KernelCommand::TaskStopped(exit));
+  }
+}
+
 fn write_banner(out_vt: Option<&SharedVt>, cmd: &str) {
   if let Some(vt) = out_vt {
     if let Ok(mut p) = vt.write() {

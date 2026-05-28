@@ -919,6 +919,36 @@ impl Proc {
         self.scroll_down_lines(n);
         *rendered = true;
       }
+      ProcMsg::RerunHook(event) => {
+        // Fire the hook on demand (blocking semantics same as during
+        // lifecycle transitions). We don't act on the failed return: the
+        // proc's overall lifecycle isn't being transitioned by this run,
+        // it's a manual invocation.
+        let ks = self.ks.clone();
+        let _ok = run_lifecycle_hook(self, event, &ks).await;
+      }
+      ProcMsg::RerunCheck(idx) => {
+        // Run the check command once, write to its VT, and emit status
+        // for the corresponding child kernel task. Independent of the
+        // running supervisor (which will continue to tick on its own).
+        if let Some(def) = self.healthchecks.get(idx).cloned() {
+          let out_vt = self.check_vts.get(idx).cloned();
+          let task_id = self.check_task_ids.get(idx).copied();
+          let cwd = self.cwd.clone();
+          let cmd = crate::mprocs::proc_health::substitute_vars(
+            &def.cmd,
+            &self.vars,
+          );
+          let timeout = def.timeout;
+          let ks = self.ks.clone();
+          tokio::spawn(async move {
+            crate::mprocs::proc::health::run_check_once_manual(
+              cmd, cwd, timeout, out_vt, task_id, ks,
+            )
+            .await;
+          });
+        }
+      }
     }
   }
 }
