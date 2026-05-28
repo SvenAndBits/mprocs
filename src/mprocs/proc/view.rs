@@ -36,6 +36,9 @@ pub struct ProcView {
   pub children: Vec<ProcChild>,
   /// Whether the sidebar shows this proc's children. Default collapsed.
   pub expanded: bool,
+  /// When the focus is inside this proc's child tree, which child row is
+  /// selected. `None` means the proc row itself is focused.
+  pub focused_child: Option<usize>,
 }
 
 impl ProcView {
@@ -63,6 +66,21 @@ impl ProcView {
 
       children,
       expanded: false,
+      focused_child: None,
+    }
+  }
+
+  /// VT that should be rendered in the right-hand term pane for the
+  /// current focus on this proc — either the proc's own VT or the
+  /// focused child's VT.
+  pub fn focused_vt(&self) -> &SharedVt {
+    match self.focused_child {
+      Some(i) => self
+        .children
+        .get(i)
+        .map(|c| &c.vt)
+        .unwrap_or(&self.vt),
+      None => &self.vt,
     }
   }
 
@@ -86,7 +104,7 @@ impl ProcView {
 
   pub fn lock_view(&'_ self) -> ProcViewFrame<'_> {
     self
-      .vt
+      .focused_vt()
       .read()
       .map_or(ProcViewFrame::Empty, |vt| ProcViewFrame::Vt(vt))
   }

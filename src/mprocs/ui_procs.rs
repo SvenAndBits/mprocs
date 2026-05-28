@@ -82,18 +82,21 @@ pub fn render_procs(
       Some(p) => p,
       None => continue,
     };
-    let selected = proc_idx == state.selected();
+    // The proc row is "selected" only when the focus is on the proc
+    // itself, not on one of its children.
+    let proc_selected =
+      proc_idx == state.selected() && proc.focused_child.is_none();
     let row_area = Rect {
       x: area.x + 1,
       y: y_cursor,
       width: area.width.saturating_sub(2),
       height: 1,
     };
-    render_proc_row(grid, row_area, proc, selected);
+    render_proc_row(grid, row_area, proc, proc_selected);
     y_cursor += 1;
 
     if proc.expanded {
-      for child in &proc.children {
+      for (ci, child) in proc.children.iter().enumerate() {
         if y_cursor >= y_max {
           break;
         }
@@ -103,7 +106,9 @@ pub fn render_procs(
           width: area.width.saturating_sub(2),
           height: 1,
         };
-        render_child_row(grid, row_area, child);
+        let child_selected = proc_idx == state.selected()
+          && proc.focused_child == Some(ci);
+        render_child_row(grid, row_area, child, child_selected);
         y_cursor += 1;
       }
     }
@@ -148,13 +153,20 @@ fn render_proc_row(
   draw_right_aligned_pill(grid, row_area, &status_text, status_attrs, attrs);
 }
 
-fn render_child_row(grid: &mut Grid, area: Rect, child: &ProcChild) {
-  let attrs = Attrs::default();
+fn render_child_row(
+  grid: &mut Grid,
+  area: Rect,
+  child: &ProcChild,
+  selected: bool,
+) {
+  let attrs = if selected {
+    Attrs::default().bg(Color::Idx(240))
+  } else {
+    Attrs::default()
+  };
   let mut row_area = area;
 
-  // Selection-marker column stays blank for child rows (not selectable in
-  // this iteration).
-  let r = grid.draw_text(row_area, " ", attrs);
+  let r = grid.draw_text(row_area, if selected { "•" } else { " " }, attrs);
   row_area.x += r.width;
   row_area.width = row_area.width.saturating_sub(r.width);
 

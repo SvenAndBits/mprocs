@@ -658,23 +658,18 @@ impl App {
         loop_action.render();
       }
       AppEvent::NextProc => {
-        let mut next = self.state.selected() + 1;
-        if next >= self.state.procs.len() {
-          next = 0;
-        }
-        self.state.select_proc(next);
+        focus_next_row(&mut self.state);
         loop_action.render();
       }
       AppEvent::PrevProc => {
-        let next = if self.state.selected() > 0 {
-          self.state.selected() - 1
-        } else {
-          self.state.procs.len().saturating_sub(1)
-        };
-        self.state.select_proc(next);
+        focus_prev_row(&mut self.state);
         loop_action.render();
       }
       AppEvent::SelectProc { index } => {
+        // External API: index is a proc index. Reset child focus.
+        if let Some(p) = self.state.procs.get_mut(*index) {
+          p.focused_child = None;
+        }
         self.state.select_proc(*index);
         loop_action.render();
       }
@@ -682,6 +677,9 @@ impl App {
         if let Some(proc) = self.state.get_current_proc_mut() {
           if !proc.children.is_empty() {
             proc.expanded = !proc.expanded;
+            if !proc.expanded {
+              proc.focused_child = None;
+            }
             loop_action.render();
           }
         }
@@ -1203,4 +1201,90 @@ pub async fn server_main(
   app.run().await?;
 
   Ok(())
+}
+
+/// Move focus to the next visible row in the sidebar tree.
+///
+/// Iteration order: for each proc, the proc row, then (if expanded) each of
+/// its child rows, then the next proc. Wraps around at the end.
+fn focus_next_row(state: &mut crate::mprocs::state::State) {
+  if state.procs.is_empty() {
+    return;
+  }
+  let cur_proc = state.selected();
+  let cur_child = state
+    .procs
+    .get(cur_proc)
+    .and_then(|p| p.focused_child);
+  if let Some(p) = state.procs.get(cur_proc) {
+    if p.expanded && !p.children.is_empty() {
+      match cur_child {
+        None => {
+          if let Some(p) = state.procs.get_mut(cur_proc) {
+            p.focused_child = Some(0);
+          }
+          return;
+        }
+        Some(i) if i + 1 < p.children.len() => {
+          if let Some(p) = state.procs.get_mut(cur_proc) {
+            p.focused_child = Some(i + 1);
+          }
+          return;
+        }
+        _ => {}
+      }
+    }
+  }
+  // Move to next proc.
+  if let Some(p) = state.procs.get_mut(cur_proc) {
+    p.focused_child = None;
+  }
+  let next = (cur_proc + 1) % state.procs.len();
+  state.select_proc(next);
+}
+
+/// Inverse of `focus_next_row`.
+fn focus_prev_row(state: &mut crate::mprocs::state::State) {
+  if state.procs.is_empty() {
+    return;
+  }
+  let cur_proc = state.selected();
+  let cur_child = state
+    .procs
+    .get(cur_proc)
+    .and_then(|p| p.focused_child);
+  // First try to step backwards within the current proc's children.
+  match cur_child {
+    Some(0) => {
+      if let Some(p) = state.procs.get_mut(cur_proc) {
+        p.focused_child = None;
+      }
+      return;
+    }
+    Some(i) => {
+      if let Some(p) = state.procs.get_mut(cur_proc) {
+        p.focused_child = Some(i - 1);
+      }
+      return;
+    }
+    None => {}
+  }
+  // Move to previous proc (and, if it's expanded with children, land on
+  // its last child so navigation feels symmetric with NextProc).
+  let prev = if cur_proc == 0 {
+    state.procs.len() - 1
+  } else {
+    cur_proc - 1
+  };
+  if let Some(p) = state.procs.get_mut(cur_proc) {
+    p.focused_child = None;
+  }
+  state.select_proc(prev);
+  if let Some(p) = state.procs.get_mut(prev) {
+    if p.expanded && !p.children.is_empty() {
+      p.focused_child = Some(p.children.len() - 1);
+    } else {
+      p.focused_child = None;
+    }
+  }
 }
