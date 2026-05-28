@@ -42,6 +42,7 @@ pub enum KernelCommand {
 
   // Task reporting
   TaskStarted,
+  TaskStatusChanged(TaskStatus),
   TaskStopped(u32),
 }
 

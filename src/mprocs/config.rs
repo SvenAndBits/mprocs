@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::{ffi::OsString, path::PathBuf, str::FromStr};
 
 use anyhow::{Result, bail};
@@ -8,6 +9,10 @@ use serde_yaml::Value;
 use crate::mprocs::{
   event::AppEvent,
   proc::StopSignal,
+  proc_health::{
+    HealthCheckDef, HealthCheckRegistry, HookSet, parse_hooks, parse_proc_healthchecks,
+    parse_registry, substitute_vars,
+  },
   proc_log_config::LogConfig,
   settings::Settings,
   yaml_val::{Val, value_to_string},
@@ -34,6 +39,7 @@ fn resolve_config_path(path: &str, ctx: &ConfigContext) -> Result<PathBuf> {
 
 pub struct Config {
   pub procs: Vec<ProcConfig>,
+  pub healthchecks: HealthCheckRegistry,
   pub server: Option<ServerConfig>,
   pub exec: Option<AppEvent>,
   pub hide_keymap_window: bool,
@@ -55,6 +61,13 @@ impl Config {
     let config = Val::new(value)?;
     let config = config.as_object()?;
 
+    let healthchecks =
+      if let Some(v) = config.get(&Value::from("healthchecks")) {
+        parse_registry(v)?
+      } else {
+        HealthCheckRegistry::new()
+      };
+
     let procs = if let Some(procs) = config.get(&Value::from("procs")) {
       let procs = procs
         .as_object()?
@@ -66,6 +79,7 @@ impl Config {
             settings.scrollback_len,
             proc,
             ctx,
+            &healthchecks,
           )
         })
         .collect::<Result<Vec<_>>>()?
@@ -110,6 +124,7 @@ impl Config {
 
     let config = Config {
       procs,
+      healthchecks,
       server,
       exec: None,
       hide_keymap_window: settings.hide_keymap_window,
@@ -128,6 +143,7 @@ impl Config {
   pub fn make_default(settings: &Settings) -> anyhow::Result<Self> {
     Ok(Self {
       procs: Vec::new(),
+      healthchecks: HealthCheckRegistry::new(),
       server: None,
       exec: None,
       hide_keymap_window: settings.hide_keymap_window,
@@ -155,6 +171,10 @@ pub struct ProcConfig {
 
   pub deps: Vec<String>,
 
+  pub vars: HashMap<String, String>,
+  pub healthchecks: Vec<HealthCheckDef>,
+  pub hooks: HookSet,
+
   pub mouse_scroll_speed: usize,
   pub scrollback_len: usize,
   pub log: Option<LogConfig>,
@@ -167,6 +187,7 @@ impl ProcConfig {
     scrollback_len: usize,
     val: Val,
     ctx: &ConfigContext,
+    hc_registry: &HealthCheckRegistry,
   ) -> Result<Option<ProcConfig>> {
     match val.raw() {
       Value::Null => Ok(None),
@@ -183,6 +204,9 @@ impl ProcConfig {
         autorestart: false,
         stop: StopSignal::default(),
         deps: Vec::new(),
+        vars: HashMap::new(),
+        healthchecks: Vec::new(),
+        hooks: HookSet::default(),
 
         mouse_scroll_speed,
         scrollback_len,
@@ -204,6 +228,9 @@ impl ProcConfig {
           autorestart: false,
           stop: StopSignal::default(),
           deps: Vec::new(),
+          vars: HashMap::new(),
+          healthchecks: Vec::new(),
+          hooks: HookSet::default(),
           mouse_scroll_speed,
           scrollback_len,
           log: None,
@@ -344,6 +371,40 @@ impl ProcConfig {
           Vec::new()
         };
 
+        let vars = if let Some(v) = map.get(&Value::from("vars")) {
+          let m = v.as_object()?;
+          let mut out = HashMap::with_capacity(m.len());
+          for (k, vv) in m {
+            let key = value_to_string(&k)?;
+            let val_str = match vv.raw() {
+              Value::String(s) => s.clone(),
+              Value::Bool(b) => b.to_string(),
+              Value::Number(n) => n.to_string(),
+              Value::Null => String::new(),
+              _ => bail!(
+                vv.error_at("vars values must be scalar (string/number/bool)")
+              ),
+            };
+            out.insert(key, val_str);
+          }
+          out
+        } else {
+          HashMap::new()
+        };
+
+        let healthchecks =
+          if let Some(v) = map.get(&Value::from("healthchecks")) {
+            parse_proc_healthchecks(v, hc_registry)?
+          } else {
+            Vec::new()
+          };
+
+        let hooks = if let Some(v) = map.get(&Value::from("hooks")) {
+          parse_hooks(v)?
+        } else {
+          HookSet::default()
+        };
+
         Ok(Some(ProcConfig {
           name,
           cmd,
@@ -353,6 +414,9 @@ impl ProcConfig {
           autorestart,
           stop: stop_signal,
           deps,
+          vars,
+          healthchecks,
+          hooks,
           mouse_scroll_speed,
           scrollback_len,
           log,
@@ -383,14 +447,22 @@ pub enum CmdConfig {
 impl From<&ProcConfig> for ProcessSpec {
   fn from(cfg: &ProcConfig) -> Self {
     let mut cmd = match &cfg.cmd {
-      CmdConfig::Cmd { cmd } => ProcessSpec::from_argv(cmd.clone()),
-      CmdConfig::Shell { shell } => cmd_from_shell(shell),
+      CmdConfig::Cmd { cmd } => {
+        let cmd: Vec<String> = cmd
+          .iter()
+          .map(|s| substitute_vars(s, &cfg.vars))
+          .collect();
+        ProcessSpec::from_argv(cmd)
+      }
+      CmdConfig::Shell { shell } => {
+        cmd_from_shell(&substitute_vars(shell, &cfg.vars))
+      }
     };
 
     if let Some(env) = &cfg.env {
       for (k, v) in env {
         if let Some(v) = v {
-          cmd.env(k, v);
+          cmd.env(k, substitute_vars(v, &cfg.vars));
         } else {
           cmd.env_remove(k);
         }
@@ -398,7 +470,8 @@ impl From<&ProcConfig> for ProcessSpec {
     }
 
     if let Some(cwd) = &cfg.cwd {
-      cmd.cwd(cwd.to_string_lossy());
+      let cwd_str = cwd.to_string_lossy();
+      cmd.cwd(substitute_vars(&cwd_str, &cfg.vars));
     } else if let Ok(cwd) = std::env::current_dir() {
       cmd.cwd(cwd.to_string_lossy());
     }
@@ -419,4 +492,115 @@ pub fn cmd_from_shell(shell: &str) -> ProcessSpec {
 #[cfg(not(windows))]
 pub fn cmd_from_shell(shell: &str) -> ProcessSpec {
   ProcessSpec::from_argv(vec!["/bin/sh".into(), "-c".into(), shell.into()])
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::path::PathBuf;
+
+  fn parse(yaml: &str) -> Result<Config> {
+    let value: Value = serde_yaml::from_str(yaml)?;
+    let ctx = ConfigContext {
+      path: PathBuf::from("/tmp/mprocs.yaml"),
+    };
+    let settings = Settings::default();
+    Config::from_value(&value, &ctx, &settings)
+  }
+
+  #[test]
+  fn parses_named_healthchecks_and_proc_refs() {
+    let cfg = parse(
+      r#"
+healthchecks:
+  is_port_open:
+    cmd: "nc -z localhost %PORT%"
+    interval: 5s
+    timeout: 2s
+    start_period: 1s
+    retries: 4
+procs:
+  api:
+    shell: "run-api"
+    vars:
+      PORT: 3000
+    healthchecks:
+      - is_port_open
+      - cmd: "curl -fsS http://localhost:%PORT%/health"
+        interval: 3s
+"#,
+    )
+    .expect("parse");
+    assert_eq!(cfg.healthchecks.len(), 1);
+    assert!(cfg.healthchecks.contains_key("is_port_open"));
+    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
+    assert_eq!(p.vars.get("PORT"), Some(&"3000".to_string()));
+    assert_eq!(p.healthchecks.len(), 2);
+    assert_eq!(p.healthchecks[0].cmd, "nc -z localhost %PORT%");
+    assert_eq!(p.healthchecks[0].retries, 4);
+    assert_eq!(
+      p.healthchecks[1].cmd,
+      "curl -fsS http://localhost:%PORT%/health"
+    );
+  }
+
+  #[test]
+  fn rejects_unknown_named_healthcheck() {
+    let res = parse(
+      r#"
+procs:
+  api:
+    shell: "run-api"
+    healthchecks: [does_not_exist]
+"#,
+    );
+    let err = match res {
+      Ok(_) => panic!("expected error"),
+      Err(e) => e,
+    };
+    assert!(err.to_string().contains("does_not_exist"));
+  }
+
+  #[test]
+  fn parses_hooks() {
+    let cfg = parse(
+      r#"
+procs:
+  api:
+    shell: "run-api"
+    hooks:
+      started:
+        cmd: "echo up"
+      stopped:
+        cmd: "echo down"
+        async: true
+"#,
+    )
+    .expect("parse");
+    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
+    assert!(p.hooks.started.is_some());
+    assert_eq!(p.hooks.started.as_ref().unwrap().cmd, "echo up");
+    assert!(!p.hooks.started.as_ref().unwrap().async_);
+    assert!(p.hooks.stopped.as_ref().unwrap().async_);
+  }
+
+  #[test]
+  fn vars_substitute_into_shell() {
+    let cfg = parse(
+      r#"
+procs:
+  api:
+    shell: "echo %PORT% %HOST%"
+    vars:
+      PORT: 5432
+      HOST: localhost
+"#,
+    )
+    .expect("parse");
+    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
+    let spec: ProcessSpec = p.into();
+    // The final argv element is the substituted shell string.
+    let last = spec.args.last().expect("argv");
+    assert_eq!(last, "echo 5432 localhost");
+  }
 }

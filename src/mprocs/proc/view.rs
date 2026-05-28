@@ -57,8 +57,10 @@ impl ProcView {
 
   pub fn exit_code(&self) -> Option<u32> {
     match self.status {
-      TaskStatus::NotStarted => None,
-      TaskStatus::Running => None,
+      TaskStatus::NotStarted
+      | TaskStatus::Starting
+      | TaskStatus::Running
+      | TaskStatus::Unhealthy => None,
       TaskStatus::Exited(code) => Some(code),
     }
   }
@@ -76,10 +78,19 @@ impl ProcView {
 
   pub fn is_up(&self) -> bool {
     match self.status {
-      TaskStatus::NotStarted => false,
-      TaskStatus::Running => true,
-      TaskStatus::Exited(_) => false,
+      TaskStatus::NotStarted | TaskStatus::Exited(_) => false,
+      TaskStatus::Starting
+      | TaskStatus::Running
+      | TaskStatus::Unhealthy => true,
     }
+  }
+
+  pub fn is_starting(&self) -> bool {
+    matches!(self.status, TaskStatus::Starting)
+  }
+
+  pub fn is_unhealthy(&self) -> bool {
+    matches!(self.status, TaskStatus::Unhealthy)
   }
 
   pub fn copy_mode(&self) -> &CopyMode {

@@ -8,10 +8,11 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::error::ResultLogger;
 use crate::kernel::kernel_message::{KernelCommand, SharedVt, TaskContext};
-use crate::kernel::task::{TaskCmd, TaskDef, TaskId};
+use crate::kernel::task::{TaskCmd, TaskDef, TaskId, TaskStatus};
 use crate::kernel::task_path::TaskPath;
 use crate::kernel::task_screen::{TaskScreen, TaskScreenCmd, TaskScreenEffect};
 use crate::mprocs::config::ProcConfig;
+use crate::mprocs::proc_health::{HealthCheckDef, HookEvent, HookSet};
 use crate::mprocs::proc_log_config::LogConfig;
 use crate::process::process::Process as _;
 use crate::process::process_spec::ProcessSpec;
@@ -21,6 +22,8 @@ use crate::term::key::Key;
 use crate::term::mouse::{MouseEvent, MouseEventKind};
 use crate::term::{MouseProtocolMode, Parser};
 
+use super::health::{AggregateOutcome, HealthRunner};
+use super::hooks::run_hook;
 use super::inst::Inst;
 use super::msg::{ProcEvent, ProcMsg};
 use super::view::ProcView;
@@ -41,6 +44,20 @@ pub struct Proc {
   pub tx: UnboundedSender<ProcEvent>,
 
   pub inst: ProcState,
+
+  /// Config fields needed for health checks and hooks (kept by-value so the
+  /// proc can run them on any spawn, including restarts).
+  vars: std::collections::HashMap<String, String>,
+  cwd: Option<std::ffi::OsString>,
+  healthchecks: Vec<HealthCheckDef>,
+  hooks: HookSet,
+  /// Active health-check supervisor for the current instance. `None` when
+  /// the proc has no healthchecks or no instance is running.
+  health_runner: Option<HealthRunner>,
+  /// Set to true once the proc has been reported as Running for the
+  /// current instance (so we don't repeat the "Started" event on healthcheck
+  /// flapping).
+  reported_running: bool,
 }
 
 #[derive(Debug)]
@@ -100,12 +117,37 @@ async fn proc_main_loop(
       Cmd(Option<TaskCmd>),
       Internal(Option<ProcEvent>),
       Read(std::io::Result<usize>),
+      Health(AggregateOutcome),
     }
     let mut read_buf = [0u8; 8 * 1024];
-    let value = select! {
-      cmd = cmd_receiver.recv() => NextValue::Cmd(cmd),
-      event = internal_receiver.recv() => NextValue::Internal(event),
-      count = proc.read(&mut read_buf) => NextValue::Read(count),
+    let value = {
+      // Disjoint field borrows so `read` and `health` can coexist in the
+      // same `select!`.
+      let Proc {
+        health_runner,
+        inst,
+        ..
+      } = &mut proc;
+      let read_fut = async {
+        if let ProcState::Some(inst) = inst {
+          if !inst.stdout_eof {
+            return inst.process.read(&mut read_buf).await;
+          }
+        }
+        std::future::pending().await
+      };
+      let health_fut = async {
+        match health_runner {
+          Some(r) => r.next().await,
+          None => std::future::pending::<AggregateOutcome>().await,
+        }
+      };
+      select! {
+        cmd = cmd_receiver.recv() => NextValue::Cmd(cmd),
+        event = internal_receiver.recv() => NextValue::Internal(event),
+        count = read_fut => NextValue::Read(count),
+        outcome = health_fut => NextValue::Health(outcome),
+      }
     };
     match value {
       NextValue::Cmd(Some(cmd)) => {
@@ -142,16 +184,53 @@ async fn proc_main_loop(
       NextValue::Cmd(None) => (),
       NextValue::Internal(Some(proc_event)) => match proc_event {
         ProcEvent::Exited(exit_code) => {
+          // Tear down health checks for the dead instance.
+          proc.health_runner = None;
+          // Run the `stopped` hook if configured (best-effort).
+          run_lifecycle_hook(&proc, HookEvent::Stopped).await;
           proc.handle_exited(exit_code);
           if !proc.is_up() {
             ks.send(KernelCommand::TaskStopped(exit_code));
           }
         }
         ProcEvent::Started => {
-          ks.send(KernelCommand::TaskStarted);
+          // Run the `started` hook (blocking by default — failure flips
+          // the proc to a failed state and skips the lifecycle transition).
+          let hook_ok = run_lifecycle_hook(&proc, HookEvent::Started).await;
+          if !hook_ok {
+            // Treat hook failure as a process failure: kill and report.
+            log::warn!("started hook failed; killing proc");
+            run_lifecycle_hook(&proc, HookEvent::Failed).await;
+            proc.kill().await;
+            // The subsequent ProcEvent::Exited will report Stopped.
+            continue;
+          }
+          if proc.has_healthchecks() {
+            ks.send(KernelCommand::TaskStatusChanged(TaskStatus::Starting));
+          } else {
+            ks.send(KernelCommand::TaskStarted);
+            proc.reported_running = true;
+          }
         }
       },
       NextValue::Internal(None) => (),
+      NextValue::Health(outcome) => match outcome {
+        AggregateOutcome::BecameHealthy => {
+          if !proc.reported_running {
+            ks.send(KernelCommand::TaskStarted);
+            proc.reported_running = true;
+          } else {
+            // Recovered from Unhealthy back to Running.
+            ks.send(KernelCommand::TaskStatusChanged(TaskStatus::Running));
+          }
+          run_lifecycle_hook(&proc, HookEvent::Healthy).await;
+        }
+        AggregateOutcome::BecameUnhealthy => {
+          ks.send(KernelCommand::TaskStatusChanged(TaskStatus::Unhealthy));
+          run_lifecycle_hook(&proc, HookEvent::Unhealthy).await;
+        }
+        AggregateOutcome::Noop => {}
+      },
       NextValue::Read(Ok(count)) => {
         let inst = match &mut proc.inst {
           ProcState::Some(inst) => inst,
@@ -194,6 +273,32 @@ async fn proc_main_loop(
           ProcState::None => {}
         };
       }
+    }
+  }
+}
+
+/// Run a lifecycle hook if one is configured for `event`. Returns `false`
+/// only when a *blocking* hook failed (the caller can then treat that as a
+/// proc failure). Returns `true` if no hook is configured, the hook ran
+/// successfully, or the hook is async.
+async fn run_lifecycle_hook(proc: &Proc, event: HookEvent) -> bool {
+  let hook = match proc.hooks.get(event) {
+    Some(h) => h,
+    None => return true,
+  };
+  let async_ = hook.async_;
+  match run_hook(hook, &proc.vars, proc.cwd.as_ref()).await {
+    Ok(()) => true,
+    Err(err) => {
+      log::warn!(
+        "hook `{:?}` for proc `{}` failed: {:?}",
+        event,
+        proc.name,
+        err
+      );
+      // Async hook failures are advisory; only blocking failures abort the
+      // lifecycle transition.
+      async_
     }
   }
 }
@@ -245,6 +350,13 @@ impl Proc {
       tx,
 
       inst: ProcState::None,
+
+      vars: cfg.vars.clone(),
+      cwd: cfg.cwd.clone(),
+      healthchecks: cfg.healthchecks.clone(),
+      hooks: cfg.hooks.clone(),
+      health_runner: None,
+      reported_running: false,
     };
 
     if cfg.autostart {
@@ -252,6 +364,31 @@ impl Proc {
     }
 
     proc
+  }
+
+  pub fn has_healthchecks(&self) -> bool {
+    !self.healthchecks.is_empty()
+  }
+
+  pub fn take_next_health_outcome(
+    &mut self,
+  ) -> Option<&mut HealthRunner> {
+    self.health_runner.as_mut()
+  }
+
+  /// Reset per-instance health state, called whenever a new process is
+  /// spawned (initial start or restart).
+  fn reset_health_state(&mut self) {
+    self.reported_running = false;
+    if self.has_healthchecks() {
+      self.health_runner = Some(HealthRunner::spawn(
+        &self.healthchecks,
+        &self.vars,
+        self.cwd.as_ref(),
+      ));
+    } else {
+      self.health_runner = None;
+    }
   }
 
   async fn spawn_new_inst(&mut self) {
@@ -279,6 +416,11 @@ impl Proc {
       }
     };
     self.inst = inst;
+    if matches!(self.inst, ProcState::Some(_)) {
+      self.reset_health_state();
+    } else {
+      self.health_runner = None;
+    }
   }
 
   pub async fn start(&mut self) {

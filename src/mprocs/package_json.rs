@@ -50,6 +50,9 @@ pub fn load_npm_procs(settings: &Settings) -> Result<Vec<ProcConfig>> {
     stop: StopSignal::default(),
 
     deps: Vec::new(),
+    vars: std::collections::HashMap::new(),
+    healthchecks: Vec::new(),
+    hooks: crate::mprocs::proc_health::HookSet::default(),
 
     mouse_scroll_speed: settings.mouse_scroll_speed,
     scrollback_len: settings.scrollback_len,

@@ -11,6 +11,7 @@ pub mod modal;
 pub mod mprocs;
 pub mod package_json;
 pub mod proc;
+pub mod proc_health;
 pub mod proc_log_config;
 pub mod server_message;
 pub mod settings;

@@ -17,6 +17,9 @@ pub trait Task: Send + 'static {
 
 pub enum TaskEffect {
   Started,
+  /// Lifecycle status update other than Started/Stopped (e.g. Starting,
+  /// Unhealthy). Does not trigger the dependency cascade.
+  StatusChanged(TaskStatus),
   Stopped(u32),
   Remove,
 }
@@ -30,6 +33,10 @@ impl Effects {
 
   pub fn started(&mut self) {
     self.0.push(TaskEffect::Started);
+  }
+
+  pub fn status_changed(&mut self, status: TaskStatus) {
+    self.0.push(TaskEffect::StatusChanged(status));
   }
 
   pub fn stopped(&mut self, code: u32) {
@@ -78,6 +85,7 @@ pub struct TaskNotification {
 pub enum TaskNotify {
   Added(Option<TaskPath>, TaskStatus, Option<SharedVt>),
   Started,
+  StatusChanged(TaskStatus),
   Stopped(u32),
   Removed,
 }
@@ -89,6 +97,7 @@ impl fmt::Debug for TaskNotify {
         write!(f, "Added({:?}, {:?})", path, status)
       }
       TaskNotify::Started => write!(f, "Started"),
+      TaskNotify::StatusChanged(s) => write!(f, "StatusChanged({:?})", s),
       TaskNotify::Stopped(code) => write!(f, "Stopped({})", code),
       TaskNotify::Removed => write!(f, "Removed"),
     }
@@ -128,7 +137,15 @@ pub struct TaskHandle {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
   NotStarted,
+  /// Spawned but not yet healthy (waiting on the first health check pass).
+  /// Only used when the proc has health checks attached.
+  Starting,
+  /// Healthy (or, for procs without health checks, simply running).
+  /// Dependencies gate on this state.
   Running,
+  /// Health checks have failed past their `retries` threshold after the
+  /// `start_period`. The proc is still alive but considered not-healthy.
+  Unhealthy,
   Exited(u32),
 }
 

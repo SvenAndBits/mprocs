@@ -810,6 +810,9 @@ impl App {
           autorestart: false,
           stop: StopSignal::default(),
           deps: Vec::new(),
+          vars: std::collections::HashMap::new(),
+          healthchecks: Vec::new(),
+          hooks: crate::mprocs::proc_health::HookSet::default(),
           mouse_scroll_speed: self.config.mouse_scroll_speed,
           scrollback_len: self.config.scrollback_len,
           log: self.config.proc_log.clone(),
@@ -1057,6 +1060,12 @@ impl App {
               self.pc.send(KernelCommand::TaskCmd(task_id, TaskCmd::Stop));
             }
           }
+          loop_action.render();
+        }
+      }
+      TaskNotify::StatusChanged(status) => {
+        if let Some(proc) = self.state.get_proc_mut(task_id) {
+          proc.status = status;
           loop_action.render();
         }
       }

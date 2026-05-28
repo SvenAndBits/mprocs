@@ -92,7 +92,17 @@ pub fn render_procs(
     row_area.x += r.width;
     row_area.width = row_area.width.saturating_sub(r.width);
 
-    let (status_text, status_attrs) = if proc.is_up() {
+    let (status_text, status_attrs) = if proc.is_starting() {
+      (
+        Cow::from(" STARTING "),
+        attrs.clone().set_bold(true).fg(Color::BRIGHT_YELLOW),
+      )
+    } else if proc.is_unhealthy() {
+      (
+        Cow::from(" UNHEALTHY "),
+        attrs.clone().set_bold(true).fg(Color::BRIGHT_RED),
+      )
+    } else if proc.is_up() {
       (
         Cow::from(" UP "),
         attrs.clone().set_bold(true).fg(Color::BRIGHT_GREEN),

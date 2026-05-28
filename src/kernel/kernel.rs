@@ -243,6 +243,9 @@ impl Kernel {
         KernelCommand::TaskStarted => {
           self.apply_effect(msg.from, TaskEffect::Started);
         }
+        KernelCommand::TaskStatusChanged(status) => {
+          self.apply_effect(msg.from, TaskEffect::StatusChanged(status));
+        }
         KernelCommand::TaskStopped(exit_code) => {
           self.apply_effect(msg.from, TaskEffect::Stopped(exit_code));
           if self.quitting && self.is_ready_to_quit() {
@@ -317,6 +320,13 @@ impl Kernel {
         self.notify_listeners(task_id, TaskNotify::Started);
       }
 
+      TaskEffect::StatusChanged(status) => {
+        if let Some(task) = self.tasks.get_mut(&task_id) {
+          task.status = status;
+        }
+        self.notify_listeners(task_id, TaskNotify::StatusChanged(status));
+      }
+
       TaskEffect::Stopped(exit_code) => {
         if let Some(task) = self.tasks.get_mut(&task_id) {
           task.status = TaskStatus::Exited(exit_code);
@@ -374,9 +384,14 @@ impl Kernel {
 
   fn is_ready_to_quit(&self) -> bool {
     for task in self.tasks.values() {
+      if !task.stop_on_quit {
+        continue;
+      }
       match task.status {
-        TaskStatus::Running if task.stop_on_quit => return false,
-        _ => (),
+        TaskStatus::Starting | TaskStatus::Running | TaskStatus::Unhealthy => {
+          return false;
+        }
+        TaskStatus::NotStarted | TaskStatus::Exited(_) => (),
       }
     }
     true

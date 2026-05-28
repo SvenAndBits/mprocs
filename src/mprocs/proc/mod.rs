@@ -1,3 +1,5 @@
+pub mod health;
+pub mod hooks;
 mod inst;
 pub mod msg;
 pub mod proc;
