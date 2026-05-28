@@ -107,7 +107,12 @@ pub fn parse_proc_healthchecks(
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum HookEvent {
   Started,
-  Healthy,
+  /// Fires when the proc transitions to the `Running` state — initial
+  /// startup once all health checks have passed, AND on recovery from
+  /// `Unhealthy`. Blocking by default; until it returns the kernel does
+  /// not promote the proc to `Running` and dependent procs are NOT
+  /// started. With `async: true` the cascade fires immediately.
+  Running,
   Unhealthy,
   Stopped,
   Failed,
@@ -117,7 +122,7 @@ impl HookEvent {
   pub fn from_str(s: &str) -> Option<Self> {
     match s {
       "started" => Some(Self::Started),
-      "healthy" => Some(Self::Healthy),
+      "running" => Some(Self::Running),
       "unhealthy" => Some(Self::Unhealthy),
       "stopped" => Some(Self::Stopped),
       "failed" => Some(Self::Failed),
@@ -153,7 +158,7 @@ impl HookDef {
 #[derive(Clone, Debug, Default)]
 pub struct HookSet {
   pub started: Option<HookDef>,
-  pub healthy: Option<HookDef>,
+  pub running: Option<HookDef>,
   pub unhealthy: Option<HookDef>,
   pub stopped: Option<HookDef>,
   pub failed: Option<HookDef>,
@@ -163,7 +168,7 @@ impl HookSet {
   pub fn get(&self, event: HookEvent) -> Option<&HookDef> {
     match event {
       HookEvent::Started => self.started.as_ref(),
-      HookEvent::Healthy => self.healthy.as_ref(),
+      HookEvent::Running => self.running.as_ref(),
       HookEvent::Unhealthy => self.unhealthy.as_ref(),
       HookEvent::Stopped => self.stopped.as_ref(),
       HookEvent::Failed => self.failed.as_ref(),
@@ -181,7 +186,7 @@ pub fn parse_hooks(val: &Val) -> Result<HookSet> {
     let def = HookDef::from_val(&v)?;
     match event {
       HookEvent::Started => out.started = Some(def),
-      HookEvent::Healthy => out.healthy = Some(def),
+      HookEvent::Running => out.running = Some(def),
       HookEvent::Unhealthy => out.unhealthy = Some(def),
       HookEvent::Stopped => out.stopped = Some(def),
       HookEvent::Failed => out.failed = Some(def),

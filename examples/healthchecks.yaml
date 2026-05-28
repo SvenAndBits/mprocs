@@ -71,6 +71,6 @@ procs:
       PORT: 4200
     healthchecks: [is_port_open]
     hooks:
-      healthy:
+      running:
         cmd: "echo portal up at $(date)"
         async: true

@@ -216,6 +216,21 @@ async fn proc_main_loop(
       NextValue::Internal(None) => (),
       NextValue::Health(outcome) => match outcome {
         AggregateOutcome::BecameHealthy => {
+          // Blocking `running` hook fires BEFORE the kernel promotes the
+          // task to Running and cascades to dependents. If it fails, the
+          // proc is marked Unhealthy and the cascade is suppressed —
+          // dependents won't see a green light they can't trust.
+          let hook_ok =
+            run_lifecycle_hook(&proc, HookEvent::Running).await;
+          if !hook_ok {
+            log::warn!(
+              "`running` hook failed for proc `{}`; staying Unhealthy",
+              proc.name
+            );
+            run_lifecycle_hook(&proc, HookEvent::Failed).await;
+            ks.send(KernelCommand::TaskStatusChanged(TaskStatus::Unhealthy));
+            continue;
+          }
           if !proc.reported_running {
             ks.send(KernelCommand::TaskStarted);
             proc.reported_running = true;
@@ -223,7 +238,6 @@ async fn proc_main_loop(
             // Recovered from Unhealthy back to Running.
             ks.send(KernelCommand::TaskStatusChanged(TaskStatus::Running));
           }
-          run_lifecycle_hook(&proc, HookEvent::Healthy).await;
         }
         AggregateOutcome::BecameUnhealthy => {
           ks.send(KernelCommand::TaskStatusChanged(TaskStatus::Unhealthy));

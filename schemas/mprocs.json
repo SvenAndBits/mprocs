@@ -211,10 +211,10 @@
             },
             "hooks": {
               "type": "object",
-              "description": "Lifecycle hooks. Each hook runs a shell command at the named transition. Blocking by default; set `async: true` to detach.",
+              "description": "Lifecycle hooks. Each hook runs a shell command at the named transition. Blocking by default; set `async: true` to detach.\n\nEvents:\n  - `started`: after the subprocess is spawned (a blocking hook here can abort the lifecycle by exiting non-zero before the proc is reported as up).\n  - `running`: after all health checks have passed AND before dependent procs are started. A blocking failure here keeps the proc Unhealthy and suppresses the dep cascade.\n  - `unhealthy`: when health checks have failed past their retries.\n  - `stopped`: after the subprocess exits.\n  - `failed`: when a blocking hook itself fails.",
               "properties": {
                 "started": { "$ref": "#/definitions/hookDef" },
-                "healthy": { "$ref": "#/definitions/hookDef" },
+                "running": { "$ref": "#/definitions/hookDef" },
                 "unhealthy": { "$ref": "#/definitions/hookDef" },
                 "stopped": { "$ref": "#/definitions/hookDef" },
                 "failed": { "$ref": "#/definitions/hookDef" }
