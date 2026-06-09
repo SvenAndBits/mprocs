@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::bail;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -20,7 +20,7 @@ use crate::{
       rename_proc::RenameProcModal,
     },
     proc::child::{
-      ChildKind, ChildRow, child_kind_from_segment, is_child_path,
+      ChildKind, ChildRow, child_kind_from_path, is_child_path, proc_path_of,
     },
     proc::view::ProcView,
     state::{Scope, State},
@@ -46,7 +46,7 @@ use crate::{
     task::{
       TaskCmd, TaskDef, TaskId, TaskNotification, TaskNotify, TaskStatus,
     },
-    task_path::TaskPath,
+    task_path::{TaskPath, sanitize_component},
     task_screen::{FramedScreenNotify, TaskScreenCmd},
   },
   process::process_spec::ProcessSpec,
@@ -75,6 +75,21 @@ fn kernel_copy_move(dir: CopyMove) -> KernelCopyMove {
     CopyMove::Left => KernelCopyMove::Left,
     CopyMove::Right => KernelCopyMove::Right,
   }
+}
+
+fn proc_path(
+  name: &str,
+  id: TaskId,
+  used: &mut HashSet<String>,
+) -> Option<TaskPath> {
+  let base = sanitize_component(name);
+  let seg = if used.contains(&base) {
+    format!("{base}-{}", id.0)
+  } else {
+    base
+  };
+  used.insert(seg.clone());
+  TaskPath::new(format!("/{seg}")).ok()
 }
 
 fn half_screen(proc: &ProcView) -> i32 {
@@ -289,10 +304,10 @@ impl App {
     status: TaskStatus,
     vt: crate::kernel::kernel_message::SharedVt,
   ) {
-    let Some(parent_path) = path.parent() else {
+    let Some(parent_path) = proc_path_of(path) else {
       return;
     };
-    let Some(kind) = child_kind_from_segment(path.name()) else {
+    let Some(kind) = child_kind_from_path(path) else {
       return;
     };
     let display = match kind {
@@ -456,16 +471,23 @@ impl App {
       .enumerate()
       .map(|(i, cfg)| (cfg.clone(), task_ids[i], deps_by_proc[i].clone()))
       .collect();
+    let mut used: HashSet<String> = HashSet::new();
     for (cfg, id, deps) in specs {
-      self.spawn_proc(cfg, id, deps);
+      let path = proc_path(&cfg.path, id, &mut used);
+      self.spawn_proc(cfg, id, path, deps);
     }
 
     Ok(())
   }
 
-  fn spawn_proc(&self, cfg: ProcConfig, task_id: TaskId, deps: Vec<TaskId>) {
+  fn spawn_proc(
+    &self,
+    cfg: ProcConfig,
+    task_id: TaskId,
+    path: Option<TaskPath>,
+    deps: Vec<TaskId>,
+  ) {
     let merged = self.config.proc_defaults.clone().overlay(cfg);
-    let path = TaskPath::new(format!("/{}", task_id.0)).ok();
     spawn_proc_task_with_id(
       &self.pc,
       task_id,
@@ -872,7 +894,14 @@ impl App {
           ..ProcConfig::default()
         };
         let id = self.pc.alloc_id();
-        self.spawn_proc(proc_config, id, Vec::new());
+        let mut used: HashSet<String> = self
+          .state
+          .procs
+          .iter()
+          .filter_map(|p| p.path.as_ref().map(|p| p.name().to_string()))
+          .collect();
+        let path = proc_path(&proc_config.path, id, &mut used);
+        self.spawn_proc(proc_config, id, path, Vec::new());
         loop_action.render();
       }
       Action::DuplicateProc => {

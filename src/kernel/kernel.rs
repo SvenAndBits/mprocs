@@ -310,8 +310,9 @@ impl Kernel {
                     .collect();
                   let children = self
                     .path_trie
-                    .glob(&format!("{}/*", path))
+                    .glob(&format!("{}/**", path))
                     .into_iter()
+                    .filter(|(_, child_id)| *child_id != id)
                     .filter_map(|(child_path, child_id)| {
                       self
                         .tasks

@@ -137,7 +137,7 @@ pub fn spawn_proc_task_with_id(
     let id = plan_child(
       parent,
       task_path.as_ref(),
-      &format!("check_{i}"),
+      &format!("checks/{i}"),
       Some(def.name.clone()),
       child_vt.clone(),
       &mut pending_children,
@@ -154,7 +154,7 @@ pub fn spawn_proc_task_with_id(
       if let Some(id) = plan_child(
         parent,
         task_path.as_ref(),
-        &format!("hook_{}", event.label()),
+        &format!("hooks/{}", event.label()),
         None,
         child_vt.clone(),
         &mut pending_children,

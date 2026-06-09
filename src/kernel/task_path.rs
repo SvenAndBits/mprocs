@@ -36,6 +36,19 @@ fn is_valid_component_char(c: char) -> bool {
   c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
 }
 
+pub fn sanitize_component(s: &str) -> String {
+  let out: String = s
+    .chars()
+    .map(|c| if is_valid_component_char(c) { c } else { '_' })
+    .collect();
+  let trimmed = out.trim_matches('_');
+  if trimmed.is_empty() {
+    "_".to_string()
+  } else {
+    trimmed.to_string()
+  }
+}
+
 impl TaskPath {
   pub fn new(s: impl Into<String>) -> Result<Self, TaskPathError> {
     let s = s.into();

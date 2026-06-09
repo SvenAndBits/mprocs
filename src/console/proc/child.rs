@@ -79,14 +79,20 @@ impl ChildRow {
   }
 }
 
-pub fn child_kind_from_segment(seg: &str) -> Option<ChildKind> {
-  if let Some(idx) = seg.strip_prefix("check_") {
-    return idx.parse::<usize>().ok().map(ChildKind::Check);
+pub fn child_kind_from_path(path: &TaskPath) -> Option<ChildKind> {
+  let comps: Vec<&str> = path.components().collect();
+  match comps.as_slice() {
+    [_proc, "checks", idx] => {
+      idx.parse::<usize>().ok().map(ChildKind::Check)
+    }
+    [_proc, "hooks", event] => HookEvent::parse(event).map(ChildKind::Hook),
+    _ => None,
   }
-  if let Some(event) = seg.strip_prefix("hook_") {
-    return HookEvent::parse(event).map(ChildKind::Hook);
-  }
-  None
+}
+
+pub fn proc_path_of(child: &TaskPath) -> Option<TaskPath> {
+  let first = child.components().next()?;
+  TaskPath::new(format!("/{first}")).ok()
 }
 
 pub fn is_child_path(path: &TaskPath) -> bool {
