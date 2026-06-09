@@ -74,6 +74,7 @@ mod unix {
   >(
     working_dir: &Path,
     spawn_server: bool,
+    config_name: &str,
   ) -> anyhow::Result<(MsgSender<S>, MsgReceiver<R>)> {
     let (lock_path, _socket_path) = daemon_paths(working_dir)?;
 
@@ -88,7 +89,7 @@ mod unix {
 
     if !daemon_running {
       if spawn_server {
-        spawn_server_daemon(working_dir)?;
+        spawn_server_daemon(working_dir, config_name)?;
       } else {
         anyhow::bail!("Daemon is not running. Start it with `dk up`.");
       }
@@ -180,6 +181,7 @@ mod windows {
   >(
     working_dir: &Path,
     spawn_server: bool,
+    config_name: &str,
   ) -> anyhow::Result<(MsgSender<S>, MsgReceiver<R>)> {
     let (lock_path, _socket_path) = daemon_paths(working_dir)?;
 
@@ -194,7 +196,7 @@ mod windows {
 
     if !daemon_running {
       if spawn_server {
-        spawn_server_daemon(working_dir)?;
+        spawn_server_daemon(working_dir, config_name)?;
       } else {
         anyhow::bail!("Daemon is not running. Start it with `dk up`.");
       }

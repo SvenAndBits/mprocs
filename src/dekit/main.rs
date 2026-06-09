@@ -89,6 +89,12 @@ pub async fn dekit_main() -> anyhow::Result<()> {
             Arg::new("log-level")
               .long("log-level")
               .help("Diagnostic log level (off|error|warn|info|debug|trace, or env_logger spec). Falls back to $DK_LOG, $RUST_LOG, then 'error' (release) or 'trace' (debug)."),
+          )
+          .arg(
+            Arg::new("config")
+              .long("config")
+              .default_value("dekit.yaml")
+              .help("Config file name to load from --dir"),
           ),
         Command::new("start")
           .about("Start the daemon for the current directory"),
@@ -109,11 +115,22 @@ pub async fn dekit_main() -> anyhow::Result<()> {
         ),
     ])
     .arg(
+      Arg::new("config")
+        .short('c')
+        .long("config")
+        .default_value("dekit.yaml")
+        .help("Config file name to load from the working directory"),
+    )
+    .arg(
       Arg::new("files")
         .action(clap::ArgAction::Append)
         .trailing_var_arg(true),
     );
   let matches = cmd.get_matches();
+  let config = matches
+    .get_one::<String>("config")
+    .cloned()
+    .unwrap_or_else(|| "dekit.yaml".to_string());
 
   if let Some(("mprocs", sub_m)) = matches.subcommand() {
     let args: Vec<String> = sub_m
@@ -135,8 +152,12 @@ pub async fn dekit_main() -> anyhow::Result<()> {
     Some(("attach", _sub_m)) => {
       let working_dir = std::env::current_dir()?;
       let (sender, receiver) =
-        connect_client_socket::<CltToSrv, SrvToClt>(&working_dir, false)
-          .await?;
+        connect_client_socket::<CltToSrv, SrvToClt>(
+          &working_dir,
+          false,
+          &config,
+        )
+        .await?;
       client_main(sender, receiver).await?;
     }
     Some(("spawn", sub_m)) => {
@@ -146,7 +167,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       let cmd: Vec<String> =
         sub_m.get_many::<String>("cmd").unwrap().cloned().collect();
       let resp =
-        rpc_request(&working_dir, DkRequest::Spawn { path, cmd, cwd }, true)
+        rpc_request(&working_dir, DkRequest::Spawn { path, cmd, cwd }, true, &config)
           .await?;
       match resp {
         DkResponse::Ok => println!("Spawned."),
@@ -158,14 +179,14 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       let working_dir = std::env::current_dir()?;
       let glob = sub_m.get_one::<String>("glob").cloned();
       let resp =
-        rpc_request(&working_dir, DkRequest::Ls { glob }, false).await?;
+        rpc_request(&working_dir, DkRequest::Ls { glob }, false, &config).await?;
       print_task_list(resp);
     }
     Some(("start", sub_m)) => {
       let working_dir = std::env::current_dir()?;
       let path = sub_m.get_one::<String>("path").unwrap().clone();
       let resp =
-        rpc_request(&working_dir, DkRequest::Start { path }, true).await?;
+        rpc_request(&working_dir, DkRequest::Start { path }, true, &config).await?;
       match resp {
         DkResponse::Ok => println!("Started."),
         DkResponse::Error(e) => eprintln!("Error: {}", e),
@@ -176,7 +197,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       let working_dir = std::env::current_dir()?;
       let path = sub_m.get_one::<String>("path").unwrap().clone();
       let resp =
-        rpc_request(&working_dir, DkRequest::Stop { path }, false).await?;
+        rpc_request(&working_dir, DkRequest::Stop { path }, false, &config).await?;
       match resp {
         DkResponse::Ok => println!("Stopped."),
         DkResponse::Error(e) => eprintln!("Error: {}", e),
@@ -187,7 +208,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       let working_dir = std::env::current_dir()?;
       let path = sub_m.get_one::<String>("path").unwrap().clone();
       let resp =
-        rpc_request(&working_dir, DkRequest::Kill { path }, false).await?;
+        rpc_request(&working_dir, DkRequest::Kill { path }, false, &config).await?;
       match resp {
         DkResponse::Ok => println!("Killed."),
         DkResponse::Error(e) => eprintln!("Error: {}", e),
@@ -198,7 +219,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       let working_dir = std::env::current_dir()?;
       let path = sub_m.get_one::<String>("path").unwrap().clone();
       let resp =
-        rpc_request(&working_dir, DkRequest::Restart { path }, true).await?;
+        rpc_request(&working_dir, DkRequest::Restart { path }, true, &config).await?;
       match resp {
         DkResponse::Ok => println!("Restarted."),
         DkResponse::Error(e) => eprintln!("Error: {}", e),
@@ -209,7 +230,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       let working_dir = std::env::current_dir()?;
       let path = sub_m.get_one::<String>("path").unwrap().clone();
       let resp =
-        rpc_request(&working_dir, DkRequest::Screen { path }, false).await?;
+        rpc_request(&working_dir, DkRequest::Screen { path }, false, &config).await?;
       match resp {
         DkResponse::Screen(Some(content)) => {
           print!("{}", content);
@@ -227,7 +248,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       let working_dir = std::env::current_dir()?;
       let path = sub_m.get_one::<String>("path").unwrap().clone();
       let resp =
-        rpc_request(&working_dir, DkRequest::Inspect { path }, false).await?;
+        rpc_request(&working_dir, DkRequest::Inspect { path }, false, &config).await?;
       match resp {
         DkResponse::TaskDetail(Some(detail)) => {
           println!("{}\t{}", detail.path, detail.status);
@@ -254,7 +275,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
     Some(("up", _sub_m)) => {
       let working_dir = std::env::current_dir()?;
       let resp =
-        rpc_request(&working_dir, DkRequest::Ls { glob: None }, true).await?;
+        rpc_request(&working_dir, DkRequest::Ls { glob: None }, true, &config).await?;
       print_task_list(resp);
     }
     Some(("down", _sub_m)) => {
@@ -267,7 +288,11 @@ pub async fn dekit_main() -> anyhow::Result<()> {
         let dir = run_m.get_one::<String>("dir").unwrap();
         let log_level =
           run_m.get_one::<String>("log-level").map(String::as_str);
-        run_server(PathBuf::from(dir), log_level).await?;
+        let cfg = run_m
+          .get_one::<String>("config")
+          .map(String::as_str)
+          .unwrap_or("dekit.yaml");
+        run_server(PathBuf::from(dir), cfg, log_level).await?;
       }
       Some(("start", _sub_m)) => {
         let working_dir = std::env::current_dir()?;
@@ -280,7 +305,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
           // Stale -- clean up and start fresh.
           lockfile::cleanup_stale(&working_dir)?;
         }
-        spawn_server_daemon(&working_dir)?;
+        spawn_server_daemon(&working_dir, &config)?;
         println!("Daemon started for {}.", working_dir.display());
       }
       Some(("stop", _sub_m)) => {
@@ -362,8 +387,12 @@ pub async fn dekit_main() -> anyhow::Result<()> {
         // demand.
         let working_dir = std::env::current_dir()?;
         let (sender, receiver) =
-          connect_client_socket::<CltToSrv, SrvToClt>(&working_dir, true)
-            .await?;
+          connect_client_socket::<CltToSrv, SrvToClt>(
+            &working_dir,
+            true,
+            &config,
+          )
+          .await?;
         client_main(sender, receiver).await?;
       }
     }

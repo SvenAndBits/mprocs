@@ -39,7 +39,7 @@ impl Config {
     }
   }
 
-  pub fn load_dir(working_dir: &Path) -> Result<Config> {
+  pub fn load_dir(working_dir: &Path, config_name: &str) -> Result<Config> {
     let mut config = Config::make_default();
 
     // GLOBAL
@@ -61,7 +61,7 @@ impl Config {
     }
 
     // LOCAL
-    let ws = working_dir.join("dekit.yaml");
+    let ws = working_dir.join(config_name);
     if ws.exists() {
       let cx = CfgCx::new(working_dir.to_path_buf());
       let doc = CfgDoc::load(&ws, &cx)?;

@@ -23,10 +23,11 @@ use crate::{
 
 pub async fn run_server(
   working_dir: PathBuf,
+  config_name: &str,
   log_level: Option<&str>,
 ) -> anyhow::Result<()> {
   let (config, keymap, load_err) =
-    match crate::config::config::Config::load_dir(&working_dir) {
+    match crate::config::config::Config::load_dir(&working_dir, config_name) {
       Ok(config) => {
         let keymap = config.keymap.build();
         (config, keymap, None)
