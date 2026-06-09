@@ -2,11 +2,9 @@ use anyhow::Result;
 use indexmap::IndexMap;
 use serde_json::Value;
 
-use crate::mprocs::{
-  config::{CmdConfig, ProcConfig},
-  proc::StopSignal,
-  settings::Settings,
-};
+use crate::console::proc::StopSignal;
+use crate::mprocs::config::{CmdConfig, ProcConfig};
+use crate::mprocs::settings::Settings;
 
 #[derive(serde::Deserialize)]
 struct Justfile {
@@ -41,14 +39,12 @@ pub fn load_just_procs(settings: &Settings) -> Result<Vec<ProcConfig>> {
       },
       cwd: None,
       env: None,
+      add_path: Vec::new(),
       autostart: false,
       autorestart: false,
 
       stop: StopSignal::default(),
       deps: Vec::new(),
-      vars: std::collections::HashMap::new(),
-      healthchecks: Vec::new(),
-      hooks: crate::mprocs::proc_health::HookSet::default(),
       mouse_scroll_speed: settings.mouse_scroll_speed,
       scrollback_len: settings.scrollback_len,
       log: None,

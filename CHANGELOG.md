@@ -1,5 +1,18 @@
 ## Unreleased
 
+## 0.9.6 - 2026-06-06
+
+- Fix TUI freeze for unserializable keys (#226)
+
+## 0.9.5 - 2026-06-01
+
+- Fix unbounded memory growth when process output contains an unterminated
+  terminal control sequence (#225)
+
+## 0.9.4 - 2026-05-30
+
+- Fixed panic when terminal reports zero screen size
+
 ## 0.9.3 - 2026-05-20
 
 - Add `{cmd: <shell>}` value for `stop` to run a shell command as the stop

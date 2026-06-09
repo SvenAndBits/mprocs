@@ -1,4 +1,5 @@
 use anyhow::{Context, anyhow, bail};
+use std::str;
 
 use crate::term::{
   key::{
@@ -712,8 +713,8 @@ fn translate_functional_key_code(
     57450 => Some(KeyCode::Modifier(ModKeyCode::RightSuper)),
     57451 => Some(KeyCode::Modifier(ModKeyCode::RightHyper)),
     57452 => Some(KeyCode::Modifier(ModKeyCode::RightMeta)),
-    57453 => Some(KeyCode::Modifier(ModKeyCode::IsoLevel3Shift)),
-    57454 => Some(KeyCode::Modifier(ModKeyCode::IsoLevel5Shift)),
+    // 57453 => Some(KeyCode::Modifier(ModKeyCode::IsoLevel3Shift)),
+    // 57454 => Some(KeyCode::Modifier(ModKeyCode::IsoLevel5Shift)),
     _ => None,
   } {
     return Some((keycode, KeyEventState::empty()));

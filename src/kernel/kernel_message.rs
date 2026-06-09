@@ -9,6 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::term::Parser;
 
+use super::sub_trie::SubMode;
 use super::task::{Task, TaskCmd, TaskDef, TaskId, TaskStatus};
 use super::task_path::TaskPath;
 
@@ -31,6 +32,7 @@ pub enum KernelCommand {
   TaskCmdByPath(TaskPath, TaskCmd),
 
   SetTaskPath(TaskId, TaskPath),
+  SetTaskLabel(TaskId, Option<String>),
 
   Query(
     KernelQuery,
@@ -40,9 +42,11 @@ pub enum KernelCommand {
   ListenTaskUpdates,
   UnlistenTaskUpdates,
 
+  SubscribePath(TaskPath, SubMode),
+  UnsubscribePath(TaskPath, SubMode),
+
   // Task reporting
   TaskStarted,
-  TaskStatusChanged(TaskStatus),
   TaskStopped(u32),
 }
 
@@ -66,6 +70,7 @@ pub enum KernelQueryResponse {
 pub struct TaskInfo {
   pub id: TaskId,
   pub path: Option<TaskPath>,
+  pub label: Option<String>,
   pub status: TaskStatus,
   pub vt: Option<SharedVt>,
 }
@@ -121,18 +126,6 @@ impl TaskContext {
       log::debug!(
         "Failed to send kernel message (task_id: {}). Channel is closed.",
         self.task_id.0,
-      );
-    }
-  }
-
-  /// Send a kernel message claiming a different `from` task id. Used by a
-  /// parent task to emit lifecycle events on behalf of one of its kernel
-  /// child tasks (e.g. health-check status updates).
-  pub fn send_for_task(&self, from: TaskId, command: KernelCommand) {
-    if let Err(_err) = self.sender.send(KernelMessage { from, command }) {
-      log::debug!(
-        "Failed to send kernel message for task_id: {}. Channel is closed.",
-        from.0,
       );
     }
   }
@@ -209,6 +202,18 @@ impl TaskContext {
 
   pub fn set_task_path(&self, task_id: TaskId, path: TaskPath) {
     self.send(KernelCommand::SetTaskPath(task_id, path));
+  }
+
+  pub fn set_task_label(&self, task_id: TaskId, label: Option<String>) {
+    self.send(KernelCommand::SetTaskLabel(task_id, label));
+  }
+
+  pub fn subscribe_path(&self, path: TaskPath, mode: SubMode) {
+    self.send(KernelCommand::SubscribePath(path, mode));
+  }
+
+  pub fn unsubscribe_path(&self, path: TaskPath, mode: SubMode) {
+    self.send(KernelCommand::UnsubscribePath(path, mode));
   }
 
   pub fn query(

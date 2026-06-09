@@ -4,17 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::kernel::task::TaskId;
 use crate::protocol::ClientId;
-use crate::term::key::Key;
+use crate::term::key::{Key, key_spec};
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(tag = "c", rename_all = "kebab-case")]
 pub enum AppEvent {
-  Batch { cmds: Vec<AppEvent> },
+  Batch {
+    cmds: Vec<AppEvent>,
+  },
 
   QuitOrAsk,
   Quit,
   ForceQuit,
-  Detach { client_id: ClientId },
+  Detach {
+    client_id: ClientId,
+  },
 
   ToggleFocus,
   FocusProcs,
@@ -24,40 +28,55 @@ pub enum AppEvent {
   ShowCommandsMenu,
   NextProc,
   PrevProc,
-  SelectProc { index: usize },
-  /// Expand or collapse the hooks/checks tree under the currently selected
-  /// proc (sidebar tree-view).
-  ToggleProcChildren,
+  SelectProc {
+    index: usize,
+  },
   StartProc,
   TermProc,
   KillProc,
   RestartProc,
   RestartAll,
-  RenameProc { name: String },
+  RenameProc {
+    name: String,
+  },
   ForceRestartProc,
   ForceRestartAll,
   ShowAddProc,
   ShowRenameProc,
-  AddProc { cmd: String, name: Option<String> },
+  AddProc {
+    cmd: String,
+    name: Option<String>,
+  },
   DuplicateProc,
   ShowRemoveProc,
-  RemoveProc { id: TaskId },
+  RemoveProc {
+    id: TaskId,
+  },
 
   CloseCurrentModal,
 
-  ScrollDownLines { n: usize },
-  ScrollUpLines { n: usize },
+  ScrollDownLines {
+    n: usize,
+  },
+  ScrollUpLines {
+    n: usize,
+  },
   ScrollDown,
   ScrollUp,
 
   CopyModeEnter,
   CopyModeLeave,
-  CopyModeMove { dir: CopyMove },
+  CopyModeMove {
+    dir: CopyMove,
+  },
   CopyModeEnd,
   CopyModeCopy,
   ToggleKeymapWindow,
 
-  SendKey { key: Key },
+  SendKey {
+    #[serde(with = "key_spec")]
+    key: Key,
+  },
 }
 
 impl AppEvent {
@@ -78,7 +97,6 @@ impl AppEvent {
       AppEvent::NextProc => "Next".to_string(),
       AppEvent::PrevProc => "Prev".to_string(),
       AppEvent::SelectProc { index } => format!("Select process #{}", index),
-      AppEvent::ToggleProcChildren => "Toggle hooks/checks tree".to_string(),
       AppEvent::StartProc => "Start".to_string(),
       AppEvent::TermProc => "Stop".to_string(),
       AppEvent::KillProc => "Kill".to_string(),
@@ -110,7 +128,7 @@ impl AppEvent {
       AppEvent::CopyModeEnd => "Select end position".to_string(),
       AppEvent::CopyModeCopy => "Copy selected text".to_string(),
       AppEvent::ToggleKeymapWindow => "Toggle help".to_string(),
-      AppEvent::SendKey { key } => format!("Send {} key", key.to_string()),
+      AppEvent::SendKey { key } => format!("Send {} key", key.spec()),
     }
   }
 }
@@ -156,6 +174,18 @@ mod tests {
       })
       .unwrap(),
       "c: send-key\nkey: <C-a>\n"
+    );
+  }
+
+  #[test]
+  fn deserialize_send_key() {
+    let ev: AppEvent =
+      serde_yaml::from_str("c: send-key\nkey: <C-a>\n").unwrap();
+    assert_eq!(
+      ev,
+      AppEvent::SendKey {
+        key: Key::parse("<C-a>").unwrap()
+      }
     );
   }
 }

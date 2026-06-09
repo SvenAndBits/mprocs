@@ -1,23 +1,16 @@
-use std::collections::HashMap;
 use std::{ffi::OsString, path::PathBuf, str::FromStr};
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
+use crate::console::action::Action;
+use crate::console::proc::StopSignal;
 use crate::mprocs::{
-  event::AppEvent,
-  proc::StopSignal,
-  proc_health::{
-    HealthCheckDef, HealthCheckRegistry, HookRegistry, HookSet, parse_hook_registry, parse_hooks,
-    parse_proc_healthchecks, parse_registry, substitute_vars,
-  },
   proc_log_config::LogConfig,
   settings::Settings,
   yaml_val::{Val, value_to_string},
 };
-use crate::process::process_spec::ProcessSpec;
 
 pub struct ConfigContext {
   pub path: PathBuf,
@@ -39,17 +32,14 @@ fn resolve_config_path(path: &str, ctx: &ConfigContext) -> Result<PathBuf> {
 
 pub struct Config {
   pub procs: Vec<ProcConfig>,
-  pub healthchecks: HealthCheckRegistry,
-  pub hooks: HookRegistry,
   pub server: Option<ServerConfig>,
-  pub exec: Option<AppEvent>,
   pub hide_keymap_window: bool,
   pub mouse_scroll_speed: usize,
   pub scrollback_len: usize,
   pub proc_list_width: usize,
   pub proc_list_title: String,
-  pub on_init: Option<AppEvent>,
-  pub on_all_finished: Option<AppEvent>,
+  pub on_init: Option<Action>,
+  pub on_all_finished: Option<Action>,
   pub proc_log: Option<LogConfig>,
 }
 
@@ -62,19 +52,6 @@ impl Config {
     let config = Val::new(value)?;
     let config = config.as_object()?;
 
-    let healthchecks =
-      if let Some(v) = config.get(&Value::from("healthchecks")) {
-        parse_registry(v)?
-      } else {
-        HealthCheckRegistry::new()
-      };
-
-    let hooks_registry = if let Some(v) = config.get(&Value::from("hooks")) {
-      parse_hook_registry(v)?
-    } else {
-      HookRegistry::new()
-    };
-
     let procs = if let Some(procs) = config.get(&Value::from("procs")) {
       let procs = procs
         .as_object()?
@@ -86,8 +63,6 @@ impl Config {
             settings.scrollback_len,
             proc,
             ctx,
-            &healthchecks,
-            &hooks_registry,
           )
         })
         .collect::<Result<Vec<_>>>()?
@@ -132,10 +107,7 @@ impl Config {
 
     let config = Config {
       procs,
-      healthchecks,
-      hooks: hooks_registry,
       server,
-      exec: None,
       hide_keymap_window: settings.hide_keymap_window,
       mouse_scroll_speed: settings.mouse_scroll_speed,
       scrollback_len: settings.scrollback_len,
@@ -152,10 +124,7 @@ impl Config {
   pub fn make_default(settings: &Settings) -> anyhow::Result<Self> {
     Ok(Self {
       procs: Vec::new(),
-      healthchecks: HealthCheckRegistry::new(),
-      hooks: HookRegistry::new(),
       server: None,
-      exec: None,
       hide_keymap_window: settings.hide_keymap_window,
       mouse_scroll_speed: settings.mouse_scroll_speed,
       scrollback_len: settings.scrollback_len,
@@ -174,6 +143,7 @@ pub struct ProcConfig {
   pub cmd: CmdConfig,
   pub cwd: Option<OsString>,
   pub env: Option<IndexMap<String, Option<String>>>,
+  pub add_path: Vec<PathBuf>,
   pub autostart: bool,
   pub autorestart: bool,
 
@@ -181,25 +151,18 @@ pub struct ProcConfig {
 
   pub deps: Vec<String>,
 
-  pub vars: HashMap<String, String>,
-  pub healthchecks: Vec<HealthCheckDef>,
-  pub hooks: HookSet,
-
   pub mouse_scroll_speed: usize,
   pub scrollback_len: usize,
   pub log: Option<LogConfig>,
 }
 
 impl ProcConfig {
-  #[allow(clippy::too_many_arguments)]
   fn from_val(
     name: String,
     mouse_scroll_speed: usize,
     scrollback_len: usize,
     val: Val,
     ctx: &ConfigContext,
-    hc_registry: &HealthCheckRegistry,
-    hook_registry: &HookRegistry,
   ) -> Result<Option<ProcConfig>> {
     match val.raw() {
       Value::Null => Ok(None),
@@ -212,13 +175,11 @@ impl ProcConfig {
         },
         cwd: None,
         env: None,
+        add_path: Vec::new(),
         autostart: true,
         autorestart: false,
         stop: StopSignal::default(),
         deps: Vec::new(),
-        vars: HashMap::new(),
-        healthchecks: Vec::new(),
-        hooks: HookSet::default(),
 
         mouse_scroll_speed,
         scrollback_len,
@@ -236,13 +197,11 @@ impl ProcConfig {
           cmd: CmdConfig::Cmd { cmd },
           cwd: None,
           env: None,
+          add_path: Vec::new(),
           autostart: true,
           autorestart: false,
           stop: StopSignal::default(),
           deps: Vec::new(),
-          vars: HashMap::new(),
-          healthchecks: Vec::new(),
-          hooks: HookSet::default(),
           mouse_scroll_speed,
           scrollback_len,
           log: None,
@@ -317,7 +276,8 @@ impl ProcConfig {
           }
           None => None,
         };
-        let env = match map.get(&Value::from("add_path")) {
+
+        let add_path = match map.get(&Value::from("add_path")) {
           Some(add_path) => {
             let extra_paths = match add_path.raw() {
               Value::String(path) => vec![path.as_str()],
@@ -329,34 +289,12 @@ impl ProcConfig {
                 bail!(add_path.error_at("Expected string or array"));
               }
             };
-            let extra_paths = extra_paths
+            extra_paths
               .into_iter()
               .map(|p| PathBuf::from_str(p).map_err(anyhow::Error::from))
-              .collect::<Result<Vec<_>>>()?;
-            let mut paths = std::env::var_os("PATH").map_or_else(
-              || Vec::new(),
-              |path_var| {
-                std::env::split_paths(&path_var)
-                  .map(|p| p.into_os_string())
-                  .collect::<Vec<_>>()
-              },
-            );
-            for p in extra_paths {
-              paths.push(p.into_os_string());
-            }
-            let path_var =
-              std::env::join_paths(paths)?.to_string_lossy().to_string();
-            let env = if let Some(mut env) = env {
-              env.insert("PATH".to_string(), Some(path_var));
-              env
-            } else {
-              let mut env = IndexMap::with_capacity(1);
-              env.insert("PATH".to_string(), Some(path_var));
-              env
-            };
-            Some(env)
+              .collect::<Result<Vec<_>>>()?
           }
-          None => env,
+          None => Vec::new(),
         };
 
         let autostart = map
@@ -383,52 +321,16 @@ impl ProcConfig {
           Vec::new()
         };
 
-        let vars = if let Some(v) = map.get(&Value::from("vars")) {
-          let m = v.as_object()?;
-          let mut out = HashMap::with_capacity(m.len());
-          for (k, vv) in m {
-            let key = value_to_string(&k)?;
-            let val_str = match vv.raw() {
-              Value::String(s) => s.clone(),
-              Value::Bool(b) => b.to_string(),
-              Value::Number(n) => n.to_string(),
-              Value::Null => String::new(),
-              _ => bail!(
-                vv.error_at("vars values must be scalar (string/number/bool)")
-              ),
-            };
-            out.insert(key, val_str);
-          }
-          out
-        } else {
-          HashMap::new()
-        };
-
-        let healthchecks =
-          if let Some(v) = map.get(&Value::from("healthchecks")) {
-            parse_proc_healthchecks(v, hc_registry)?
-          } else {
-            Vec::new()
-          };
-
-        let hooks = if let Some(v) = map.get(&Value::from("hooks")) {
-          parse_hooks(v, hook_registry)?
-        } else {
-          HookSet::default()
-        };
-
         Ok(Some(ProcConfig {
           name,
           cmd,
           cwd,
           env,
+          add_path,
           autostart,
           autorestart,
           stop: stop_signal,
           deps,
-          vars,
-          healthchecks,
-          hooks,
           mouse_scroll_speed,
           scrollback_len,
           log,
@@ -449,211 +351,8 @@ impl ServerConfig {
   }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(untagged)]
+#[derive(Clone)]
 pub enum CmdConfig {
   Cmd { cmd: Vec<String> },
   Shell { shell: String },
-}
-
-impl From<&ProcConfig> for ProcessSpec {
-  fn from(cfg: &ProcConfig) -> Self {
-    let mut cmd = match &cfg.cmd {
-      CmdConfig::Cmd { cmd } => {
-        let cmd: Vec<String> = cmd
-          .iter()
-          .map(|s| substitute_vars(s, &cfg.vars))
-          .collect();
-        ProcessSpec::from_argv(cmd)
-      }
-      CmdConfig::Shell { shell } => {
-        cmd_from_shell(&substitute_vars(shell, &cfg.vars))
-      }
-    };
-
-    if let Some(env) = &cfg.env {
-      for (k, v) in env {
-        if let Some(v) = v {
-          cmd.env(k, substitute_vars(v, &cfg.vars));
-        } else {
-          cmd.env_remove(k);
-        }
-      }
-    }
-
-    if let Some(cwd) = &cfg.cwd {
-      let cwd_str = cwd.to_string_lossy();
-      cmd.cwd(substitute_vars(&cwd_str, &cfg.vars));
-    } else if let Ok(cwd) = std::env::current_dir() {
-      cmd.cwd(cwd.to_string_lossy());
-    }
-
-    cmd
-  }
-}
-
-#[cfg(windows)]
-pub fn cmd_from_shell(shell: &str) -> ProcessSpec {
-  ProcessSpec::from_argv(vec![
-    "pwsh.exe".into(),
-    "-Command".into(),
-    shell.into(),
-  ])
-}
-
-#[cfg(not(windows))]
-pub fn cmd_from_shell(shell: &str) -> ProcessSpec {
-  ProcessSpec::from_argv(vec!["/bin/sh".into(), "-c".into(), shell.into()])
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use std::path::PathBuf;
-
-  fn parse(yaml: &str) -> Result<Config> {
-    let value: Value = serde_yaml::from_str(yaml)?;
-    let ctx = ConfigContext {
-      path: PathBuf::from("/tmp/mprocs.yaml"),
-    };
-    let settings = Settings::default();
-    Config::from_value(&value, &ctx, &settings)
-  }
-
-  #[test]
-  fn parses_named_healthchecks_and_proc_refs() {
-    let cfg = parse(
-      r#"
-healthchecks:
-  is_port_open:
-    cmd: "nc -z localhost %PORT%"
-    interval: 5s
-    timeout: 2s
-    start_period: 1s
-    retries: 4
-procs:
-  api:
-    shell: "run-api"
-    vars:
-      PORT: 3000
-    healthchecks:
-      - is_port_open
-      - cmd: "curl -fsS http://localhost:%PORT%/health"
-        interval: 3s
-"#,
-    )
-    .expect("parse");
-    assert_eq!(cfg.healthchecks.len(), 1);
-    assert!(cfg.healthchecks.contains_key("is_port_open"));
-    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
-    assert_eq!(p.vars.get("PORT"), Some(&"3000".to_string()));
-    assert_eq!(p.healthchecks.len(), 2);
-    assert_eq!(p.healthchecks[0].cmd, "nc -z localhost %PORT%");
-    assert_eq!(p.healthchecks[0].retries, 4);
-    assert_eq!(
-      p.healthchecks[1].cmd,
-      "curl -fsS http://localhost:%PORT%/health"
-    );
-  }
-
-  #[test]
-  fn rejects_unknown_named_healthcheck() {
-    let res = parse(
-      r#"
-procs:
-  api:
-    shell: "run-api"
-    healthchecks: [does_not_exist]
-"#,
-    );
-    let err = match res {
-      Ok(_) => panic!("expected error"),
-      Err(e) => e,
-    };
-    assert!(err.to_string().contains("does_not_exist"));
-  }
-
-  #[test]
-  fn parses_min_passes_on_healthcheck() {
-    let cfg = parse(
-      r#"
-healthchecks:
-  is_stable:
-    cmd: "true"
-    min_passes: 3
-procs:
-  api:
-    shell: "x"
-    healthchecks: [is_stable]
-"#,
-    )
-    .expect("parse");
-    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
-    assert_eq!(p.healthchecks[0].min_passes, 3);
-  }
-
-  #[test]
-  fn parses_top_level_hook_registry_with_ref() {
-    let cfg = parse(
-      r#"
-hooks:
-  reset-marker:
-    cmd: "rm -f .ready"
-procs:
-  api:
-    shell: "x"
-    hooks:
-      started: reset-marker
-      stopped:
-        cmd: "echo bye"
-"#,
-    )
-    .expect("parse");
-    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
-    assert_eq!(p.hooks.started.as_ref().unwrap().cmd, "rm -f .ready");
-    assert_eq!(p.hooks.stopped.as_ref().unwrap().cmd, "echo bye");
-  }
-
-  #[test]
-  fn parses_hooks() {
-    let cfg = parse(
-      r#"
-procs:
-  api:
-    shell: "run-api"
-    hooks:
-      started:
-        cmd: "echo up"
-      stopped:
-        cmd: "echo down"
-        async: true
-"#,
-    )
-    .expect("parse");
-    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
-    assert!(p.hooks.started.is_some());
-    assert_eq!(p.hooks.started.as_ref().unwrap().cmd, "echo up");
-    assert!(!p.hooks.started.as_ref().unwrap().async_);
-    assert!(p.hooks.stopped.as_ref().unwrap().async_);
-  }
-
-  #[test]
-  fn vars_substitute_into_shell() {
-    let cfg = parse(
-      r#"
-procs:
-  api:
-    shell: "echo %PORT% %HOST%"
-    vars:
-      PORT: 5432
-      HOST: localhost
-"#,
-    )
-    .expect("parse");
-    let p = cfg.procs.iter().find(|p| p.name == "api").unwrap();
-    let spec: ProcessSpec = p.into();
-    // The final argv element is the substituted shell string.
-    let last = spec.args.last().expect("argv");
-    assert_eq!(last, "echo 5432 localhost");
-  }
 }

@@ -4,11 +4,9 @@ use anyhow::Result;
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::mprocs::{
-  config::{CmdConfig, ProcConfig},
-  proc::StopSignal,
-  settings::Settings,
-};
+use crate::console::proc::StopSignal;
+use crate::mprocs::config::{CmdConfig, ProcConfig};
+use crate::mprocs::settings::Settings;
 
 #[derive(Deserialize)]
 struct Package {
@@ -44,15 +42,13 @@ pub fn load_npm_procs(settings: &Settings) -> Result<Vec<ProcConfig>> {
     cmd: CmdConfig::Shell { shell: cmd },
     cwd: None,
     env: Some(env.clone()),
+    add_path: Vec::new(),
     autostart: false,
     autorestart: false,
 
     stop: StopSignal::default(),
 
     deps: Vec::new(),
-    vars: std::collections::HashMap::new(),
-    healthchecks: Vec::new(),
-    hooks: crate::mprocs::proc_health::HookSet::default(),
 
     mouse_scroll_speed: settings.mouse_scroll_speed,
     scrollback_len: settings.scrollback_len,

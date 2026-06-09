@@ -3,46 +3,34 @@ use std::{
   fs::File,
   io::BufRead,
   io::BufReader,
-  io::Read,
   path::{Path, PathBuf},
 };
 
+use crate::console::app::create_app_task;
+use crate::console::keymap::Keymap;
+use crate::console::proc::StopSignal;
 #[cfg(unix)]
 use crate::error::ResultLogger;
 use crate::ipc::{receiver::MsgReceiver, sender::MsgSender};
 use crate::kernel::kernel::Kernel;
-use crate::mprocs::app::create_app_task;
 use crate::mprocs::config::{
   CmdConfig, Config, ConfigContext, ProcConfig, ServerConfig,
 };
-use crate::mprocs::config_lua::load_lua_config;
 use crate::mprocs::ctl::run_ctl;
 use crate::mprocs::just::load_just_procs;
-use crate::mprocs::keymap::Keymap;
 use crate::mprocs::package_json::load_npm_procs;
-use crate::mprocs::proc::StopSignal;
 use crate::mprocs::proc_log_config::{LogConfig, LogMode};
 use crate::mprocs::settings::Settings;
 use crate::mprocs::yaml_val::Val;
 use crate::{
-  attach_client::client_main, mprocs::app_client::client_loop,
+  attach_client::client_main, console::app_client::client_loop,
   protocol::ClientId,
 };
 use anyhow::{Result, bail};
 use clap::{ArgMatches, arg, command};
 use serde_yaml::Value;
 
-pub async fn mprocs_main() -> anyhow::Result<()> {
-  match run_app().await {
-    Ok(()) => Ok(()),
-    Err(err) => {
-      eprintln!("Error: {:?}", err);
-      Ok(())
-    }
-  }
-}
-
-async fn run_app() -> anyhow::Result<()> {
+pub async fn run_app(args: Vec<String>) -> anyhow::Result<()> {
   let matches = command!()
     .arg(arg!(-c --config [PATH] "Config path [default: mprocs.yaml]"))
     .arg(arg!(-s --server [PATH] "Remote control server address. Example: 127.0.0.1:4050."))
@@ -66,7 +54,7 @@ async fn run_app() -> anyhow::Result<()> {
     )
     .arg(arg!(--"log-level" [SPEC] "Diagnostic log level (off|error|warn|info|debug|trace, or env_logger spec). Falls back to $MPROCS_LOG, $RUST_LOG, then 'error' (release) or 'trace' (debug)."))
     .arg(arg!([COMMANDS]... "Commands to run (if omitted, commands from config will be run)"))
-    .get_matches();
+    .get_matches_from(args);
 
   let config_value = load_config_value(&matches)
     .map_err(|e| anyhow::Error::msg(format!("[{}] {}", "config", e)))?;
@@ -168,13 +156,11 @@ async fn run_app() -> anyhow::Result<()> {
           },
           env: None,
           cwd: None,
+          add_path: Vec::new(),
           autostart: true,
           autorestart: false,
           stop: StopSignal::default(),
           deps: Vec::new(),
-          vars: std::collections::HashMap::new(),
-          healthchecks: Vec::new(),
-          hooks: crate::mprocs::proc_health::HookSet::default(),
           mouse_scroll_speed: settings.mouse_scroll_speed,
           scrollback_len: settings.scrollback_len,
           log: config.proc_log.clone(),
@@ -217,6 +203,8 @@ async fn run_app() -> anyhow::Result<()> {
         cli_level: matches.get_one::<String>("log-level").map(String::as_str),
         log_env: "MPROCS_LOG",
         file_env: "MPROCS_LOG_FILE",
+        config_level: None,
+        config_file: None,
         default_dir: None,
       })?;
 
@@ -237,7 +225,11 @@ async fn run_app() -> anyhow::Result<()> {
       crate::process::unix_processes_waiter::UnixProcessesWaiter::init()?;
       let kernel = Kernel::new();
       let pc = kernel.context();
-      let app_task_id = create_app_task(config, keymap, &pc);
+      let app_task_id = create_app_task(
+        crate::config::config::Config::from(config),
+        keymap,
+        &pc,
+      );
 
       let app_sender = pc.get_task_sender(app_task_id);
       tokio::spawn(async move {
@@ -288,13 +280,11 @@ fn load_procfile_procs(
         cmd: CmdConfig::Shell { shell: cmd },
         cwd: None,
         env: None,
+        add_path: Vec::new(),
         autostart: false,
         autorestart: false,
         stop: StopSignal::default(),
         deps: Vec::new(),
-        vars: std::collections::HashMap::new(),
-        healthchecks: Vec::new(),
-        hooks: crate::mprocs::proc_health::HookSet::default(),
         mouse_scroll_speed: settings.mouse_scroll_speed,
         scrollback_len: settings.scrollback_len,
         log: None,
@@ -335,16 +325,6 @@ fn load_config_value(
   }
 
   {
-    let path = "mprocs.lua";
-    if Path::new(path).is_file() {
-      return Ok(Some((
-        read_value(path)?,
-        ConfigContext { path: path.into() },
-      )));
-    }
-  }
-
-  {
     let path = "mprocs.yaml";
     if Path::new(path).is_file() {
       return Ok(Some((
@@ -378,18 +358,13 @@ fn read_value(path: &str) -> Result<Value> {
       _kind => return Err(err.into()),
     },
   };
-  let mut reader = std::io::BufReader::new(file);
+  let reader = std::io::BufReader::new(file);
   let ext = std::path::Path::new(path)
     .extension()
     .map_or_else(|| "".to_string(), |ext| ext.to_string_lossy().to_string());
   let mut value: Value = match ext.as_str() {
     "yaml" | "yml" | "json" => serde_yaml::from_reader(reader)?,
-    "lua" => {
-      let mut buf = String::new();
-      reader.read_to_string(&mut buf)?;
-      load_lua_config(path, &buf)?
-    }
-    _ => bail!("Supported config extensions: lua, yaml, yml, json."),
+    _ => bail!("Supported config extensions: yaml, yml, json."),
   };
   value.apply_merge().unwrap();
   Ok(value)

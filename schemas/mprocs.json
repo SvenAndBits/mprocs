@@ -40,20 +40,6 @@
       "$ref": "#/definitions/logConfig",
       "description": "Default logging config for processes. Per-process `log` values merge with this."
     },
-    "healthchecks": {
-      "type": "object",
-      "description": "Named, reusable health checks. Each entry is referenced by name in a proc's `healthchecks` list, or `cmd` may be inlined directly.",
-      "additionalProperties": {
-        "$ref": "#/definitions/healthCheckDef"
-      }
-    },
-    "hooks": {
-      "type": "object",
-      "description": "Named, reusable lifecycle hooks. Each entry is referenced by name from a proc's `hooks` block (e.g. `hooks: { started: my-named-hook }`), or the hook can be inlined directly.",
-      "additionalProperties": {
-        "$ref": "#/definitions/hookDef"
-      }
-    },
     "on_all_finished": {
       "$ref": "#/definitions/appEvent",
       "description": "Event to fire when all processes have finished."
@@ -193,40 +179,7 @@
               "items": {
                 "type": "string"
               },
-              "description": "Names of processes this process depends on. A dep is satisfied when the dependency reaches the Running (healthy) state."
-            },
-            "vars": {
-              "type": "object",
-              "description": "Key/value variables substituted as `%KEY%` in `shell`, `cmd`, `cwd`, `env`, healthcheck `cmd`s and hook `cmd`s for this process.",
-              "additionalProperties": {
-                "oneOf": [
-                  { "type": "string" },
-                  { "type": "number" },
-                  { "type": "boolean" }
-                ]
-              }
-            },
-            "healthchecks": {
-              "type": "array",
-              "description": "Health checks attached to this process. Strings reference the top-level registry; inline objects define an anonymous check. The process is considered healthy only when every attached check has passed at least once (AND).",
-              "items": {
-                "oneOf": [
-                  { "type": "string" },
-                  { "$ref": "#/definitions/healthCheckDef" }
-                ]
-              }
-            },
-            "hooks": {
-              "type": "object",
-              "description": "Lifecycle hooks. Each hook runs a shell command at the named transition. Blocking by default; set `async: true` to detach.\n\nValue per event is either a string (reference to the top-level `hooks:` registry) or an inline mapping with `cmd:`.\n\nEvents:\n  - `started`: after the subprocess is spawned (a blocking hook here can abort the lifecycle by exiting non-zero before the proc is reported as up).\n  - `running`: after all health checks have passed AND before dependent procs are started. A blocking failure here keeps the proc Unhealthy and suppresses the dep cascade.\n  - `unhealthy`: when health checks have failed past their retries.\n  - `stopped`: after the subprocess exits.\n  - `failed`: when a blocking hook itself fails.\n\nHook commands inherit the proc's full environment (mprocs's env + per-proc `env:` overrides + `add_path:` effects), and `%VAR%` substitution applies just as for the proc's `shell:`.",
-              "properties": {
-                "started": { "$ref": "#/definitions/hookValue" },
-                "running": { "$ref": "#/definitions/hookValue" },
-                "unhealthy": { "$ref": "#/definitions/hookValue" },
-                "stopped": { "$ref": "#/definitions/hookValue" },
-                "failed": { "$ref": "#/definitions/hookValue" }
-              },
-              "additionalProperties": false
+              "description": "Names of processes this process depends on."
             },
             "log": {
               "$ref": "#/definitions/logConfig",
@@ -244,63 +197,6 @@
           "additionalProperties": false
         }
       ]
-    },
-    "healthCheckDef": {
-      "type": "object",
-      "description": "A health check definition. `cmd` is required; the check passes when the command exits with status 0. Durations accept suffixes `ms`, `s`, `m`, `h` (e.g. \"5s\", \"500ms\"). A bare number is treated as seconds.",
-      "properties": {
-        "cmd": {
-          "type": "string",
-          "description": "Shell command to run. Exit code 0 = healthy, anything else = unhealthy."
-        },
-        "interval": {
-          "type": "string",
-          "description": "How often to run the check. Default: 10s."
-        },
-        "timeout": {
-          "type": "string",
-          "description": "Max time the check command may run before being treated as a failure. Default: 5s."
-        },
-        "start_period": {
-          "type": "string",
-          "description": "Grace period after the proc starts during which failures don't count toward `retries`. Successes still count and can mark the proc healthy. Default: 0s."
-        },
-        "retries": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Consecutive failures (after the start period) before the proc is marked Unhealthy. Default: 3."
-        },
-        "min_passes": {
-          "type": "integer",
-          "minimum": 1,
-          "description": "Consecutive successful invocations required before this check is considered passing. A failure resets the counter. Default: 1. Bump to require stability (e.g. `min_passes: 3` for Postgres on Docker Desktop)."
-        }
-      },
-      "required": ["cmd"],
-      "additionalProperties": false
-    },
-    "hookValue": {
-      "description": "Either a string (reference to the top-level `hooks:` registry) or an inline hook definition.",
-      "oneOf": [
-        { "type": "string" },
-        { "$ref": "#/definitions/hookDef" }
-      ]
-    },
-    "hookDef": {
-      "type": "object",
-      "description": "A lifecycle hook definition.",
-      "properties": {
-        "cmd": {
-          "type": "string",
-          "description": "Shell command to run. Variables (`%KEY%`) from the proc's `vars` are substituted."
-        },
-        "async": {
-          "type": "boolean",
-          "description": "If true, the hook runs detached and never blocks the lifecycle transition. Default: false (blocking; a non-zero exit code aborts the transition and triggers the `failed` hook)."
-        }
-      },
-      "required": ["cmd"],
-      "additionalProperties": false
     },
     "logConfig": {
       "description": "Logging config. `true` enables defaults; `false` disables; a string is shorthand for `{ dir: ... }`; an object is the full form. Paths support the <CONFIG_DIR> prefix.",

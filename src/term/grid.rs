@@ -8,7 +8,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::common::{CursorStyle, Size};
 
-use super::{attrs::Attrs, row::Row, Cell};
+use super::{Cell, attrs::Attrs, row::Row};
 
 #[derive(Clone, Debug)]
 pub struct Grid {
@@ -32,6 +32,11 @@ pub struct Grid {
 
 impl Grid {
   pub fn new(size: Size, scrollback_len: usize) -> Self {
+    let size = Size {
+      height: size.height.max(1),
+      width: size.width.max(1),
+    };
+
     let mut rows = VecDeque::with_capacity(size.height.into());
     for _ in 0..size.height {
       rows.push_back(Row::new(size.width));
@@ -115,6 +120,11 @@ impl Grid {
   }
 
   pub fn set_size(&mut self, size: Size) {
+    let size = Size {
+      height: size.height.max(1),
+      width: size.width.max(1),
+    };
+
     if self.size == size {
       return;
     }
@@ -897,24 +907,6 @@ impl Rect {
       height: (self.height as i32 + offset) as u16,
       ..self
     }
-  }
-}
-
-/// Computes the scroll offset so that `selected` is visible within a viewport
-/// of `viewport_height` items. Returns the index of the first visible item.
-pub fn scroll_offset(
-  selected: usize,
-  item_count: usize,
-  viewport_height: usize,
-) -> usize {
-  if item_count == 0 || viewport_height == 0 {
-    return 0;
-  }
-  let max_start = item_count.saturating_sub(viewport_height);
-  if selected >= viewport_height {
-    (selected - viewport_height + 1).min(max_start)
-  } else {
-    0
   }
 }
 

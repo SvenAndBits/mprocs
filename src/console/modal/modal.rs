@@ -1,0 +1,39 @@
+use crate::console::{app::LoopAction, state::State};
+use crate::term::{grid::Rect, Grid, TermEvent};
+
+pub trait Modal: Send {
+  fn boxed(self) -> Box<dyn Modal>
+  where
+    Self: std::marker::Sized + 'static,
+  {
+    Box::new(self)
+  }
+
+  fn handle_input(
+    &mut self,
+    state: &mut State,
+    loop_action: &mut LoopAction,
+    event: &TermEvent,
+  ) -> bool;
+
+  fn get_size(&mut self, frame_area: Rect) -> (u16, u16);
+
+  fn area(&mut self, frame_area: Rect) -> Rect {
+    let (w, h) = self.get_size(frame_area);
+
+    let y = frame_area.height.saturating_sub(h) / 2;
+    let x = frame_area.width.saturating_sub(w) / 2;
+
+    let w = w.min(frame_area.width);
+    let h = h.min(frame_area.height);
+
+    Rect {
+      x,
+      y,
+      width: w,
+      height: h,
+    }
+  }
+
+  fn render(&mut self, grid: &mut Grid);
+}

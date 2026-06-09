@@ -1,6 +1,6 @@
 [package]
 name = "mprocs"
-version = "0.9.3"
+version = "0.9.6"
 description = "TUI for running multiple processes"
 repository = "https://github.com/pvolok/mprocs"
 authors = ["Pavel Volokitin <pavelvolokitin@gmail.com>"]
@@ -12,15 +12,11 @@ categories = [
   "development-tools",
 ]
 keywords = ["cli", "terminal", "tui", "utility"]
-default-run = "mprocs"
+default-run = "dekit"
 
 include = ["*"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[[bin]]
-name = "mprocs"
-path = "bin/mprocs.rs"
 
 [[bin]]
 name = "dekit"
@@ -46,13 +42,6 @@ indexmap = { version = "2.0.0", features = ["serde"] }
 lazy_static = "1.4.0"
 libc = "0.2.147"
 log = "0.4.19"
-mlua = { version = "0.11.1", features = [
-  "lua52",
-  "vendored",
-  "serialize",
-  "async",
-  "send",
-] }
 phf = { version = "0.12.1", features = ["macros"] }
 serde = { version = "1.0.177", features = ["derive"] }
 serde_json = "1.0.138"
