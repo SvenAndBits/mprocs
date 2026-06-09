@@ -250,10 +250,12 @@ impl App {
     ));
   }
 
-  fn deps_for_path(&self, path: Option<&TaskPath>) -> Vec<String> {
-    path
-      .map(|p| p.name())
-      .and_then(|name| self.config.procs.iter().find(|p| p.path == name))
+  fn deps_for_name(&self, name: &str) -> Vec<String> {
+    self
+      .config
+      .procs
+      .iter()
+      .find(|p| p.path == name)
       .map(|cfg| cfg.deps.clone())
       .unwrap_or_default()
   }
@@ -266,7 +268,7 @@ impl App {
     vt: crate::kernel::kernel_message::SharedVt,
     path: Option<TaskPath>,
   ) -> ProcView {
-    let deps = self.deps_for_path(path.as_ref());
+    let deps = self.deps_for_name(&name);
     let mut pv = ProcView::new(id, name, status, vt, path, deps.clone());
     if !deps.is_empty() {
       pv.children.push(ChildRow::new(

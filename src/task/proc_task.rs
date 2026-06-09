@@ -1047,6 +1047,95 @@ mod tests {
 
     let _ = std::fs::remove_file(&marker);
   }
+
+  async fn status_of(
+    pc: &TaskContext,
+    path: &str,
+  ) -> Option<crate::kernel::task::TaskStatus> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    pc.send(KernelCommand::Query(KernelQuery::ListTasks(None), tx));
+    let resp = tokio::time::timeout(Duration::from_secs(1), rx)
+      .await
+      .ok()?
+      .ok()?;
+    match resp {
+      KernelQueryResponse::TaskList(list) => list
+        .into_iter()
+        .find(|t| t.path.as_ref().map(|p| p.to_string()).as_deref() == Some(path))
+        .map(|t| t.status),
+      _ => None,
+    }
+  }
+
+  #[tokio::test]
+  async fn failing_healthcheck_marks_unhealthy_and_gates_dependent() {
+    use crate::config::health::HealthCheckDef;
+    use crate::kernel::task::TaskStatus;
+
+    let kernel = Kernel::new();
+    let pc = kernel.context();
+
+    let check = HealthCheckDef {
+      name: "always_fail".to_string(),
+      cmd: "false".to_string(),
+      interval: Duration::from_millis(50),
+      timeout: Duration::from_secs(1),
+      start_period: Duration::from_millis(0),
+      retries: 1,
+      min_passes: 1,
+    };
+    let provider_id = pc.alloc_id();
+    spawn_proc_task_with_id(
+      &pc,
+      provider_id,
+      Some(TaskPath::new("/provider").unwrap()),
+      ProcTaskConfig {
+        healthchecks: vec![check],
+        ..ProcTaskConfig::new(ProcessSpec::from_argv(vec![
+          "sleep".to_string(),
+          "100".to_string(),
+        ]))
+      },
+    );
+
+    let dependent_id = pc.alloc_id();
+    spawn_proc_task_with_id(
+      &pc,
+      dependent_id,
+      Some(TaskPath::new("/dependent").unwrap()),
+      ProcTaskConfig {
+        deps: vec![provider_id],
+        ..ProcTaskConfig::new(ProcessSpec::from_argv(vec![
+          "sleep".to_string(),
+          "100".to_string(),
+        ]))
+      },
+    );
+
+    let kernel_task = tokio::spawn(kernel.run());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+      let st = status_of(&pc, "/provider").await;
+      if matches!(st, Some(TaskStatus::Unhealthy)) {
+        break;
+      }
+      assert!(
+        !matches!(st, Some(TaskStatus::Running)),
+        "provider must never reach Running with a failing check, got {st:?}"
+      );
+      assert!(Instant::now() < deadline, "provider never became Unhealthy");
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+      status_of(&pc, "/dependent").await,
+      Some(TaskStatus::NotStarted),
+      "dependent must stay gated while provider is not Running"
+    );
+
+    kernel_task.abort();
+  }
 }
 
 fn spawn_native(

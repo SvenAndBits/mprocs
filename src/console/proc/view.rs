@@ -105,12 +105,4 @@ impl ProcView {
       .iter_mut()
       .find(|c| c.task_id == Some(task_id))
   }
-
-  pub fn visible_row_count(&self) -> usize {
-    if self.expanded {
-      1 + self.children.len()
-    } else {
-      1
-    }
-  }
 }
