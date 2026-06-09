@@ -185,6 +185,13 @@ impl Console {
         }
         true
       }
+      TaskNotify::StatusChanged(status) => {
+        if let Some(entry) = self.state.tasks.iter_mut().find(|t| t.id == from)
+        {
+          entry.status = status;
+        }
+        true
+      }
       TaskNotify::Stopped(exit_code) => {
         if let Some(entry) = self.state.tasks.iter_mut().find(|t| t.id == from)
         {

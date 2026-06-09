@@ -150,12 +150,23 @@ impl Kernel {
           if let Some(task) = self.tasks.get_mut(&task_id) {
             match cmd {
               TaskCmd::Start => {
-                let all_deps_ready = task
-                  .deps
-                  .iter()
-                  .all(|(_, dep)| dep.status == TaskStatus::Running);
-                if all_deps_ready {
-                  task.task.handle_cmd(cmd, &mut fx);
+                // Once we've started quitting, ignore any Start commands —
+                // including ones the dep cascade auto-fires when a proc
+                // briefly transitions to Running (e.g. healthchecks pass
+                // mid-quit on a proc that was already mid-stop). Without
+                // this gate, a NotStarted dependent can spawn a fresh
+                // subprocess that nothing then asks to stop, blocking
+                // is_ready_to_quit forever.
+                if self.quitting {
+                  // drop
+                } else {
+                  let all_deps_ready = task
+                    .deps
+                    .iter()
+                    .all(|(_, dep)| dep.status == TaskStatus::Running);
+                  if all_deps_ready {
+                    task.task.handle_cmd(cmd, &mut fx);
+                  }
                 }
               }
               _ => {
@@ -243,6 +254,9 @@ impl Kernel {
         KernelCommand::TaskStarted => {
           self.apply_effect(msg.from, TaskEffect::Started);
         }
+        KernelCommand::TaskStatusChanged(status) => {
+          self.apply_effect(msg.from, TaskEffect::StatusChanged(status));
+        }
         KernelCommand::TaskStopped(exit_code) => {
           self.apply_effect(msg.from, TaskEffect::Stopped(exit_code));
           if self.quitting && self.is_ready_to_quit() {
@@ -277,11 +291,30 @@ impl Kernel {
     match effect {
       TaskEffect::Started => {
         let mut started = false;
+        let mut force_stop = false;
         if let Some(task) = self.tasks.get_mut(&task_id) {
           if task.status != TaskStatus::Running {
             started = true;
           }
           task.status = TaskStatus::Running;
+          // If a proc finishes starting AFTER we've already begun
+          // quitting (e.g. its spawn was already in flight when the
+          // user pressed q, or healthchecks happened to pass during the
+          // stop window), immediately tell it to stop. Without this,
+          // the proc sits Running with no Stop request and quit blocks
+          // on is_ready_to_quit forever.
+          if self.quitting && task.stop_on_quit {
+            force_stop = true;
+          }
+        }
+        if force_stop {
+          self
+            .sender
+            .send(KernelMessage {
+              from: TaskId(0),
+              command: KernelCommand::TaskCmd(task_id, TaskCmd::Stop),
+            })
+            .log_ignore();
         }
 
         if started {
@@ -315,6 +348,13 @@ impl Kernel {
         }
 
         self.notify_listeners(task_id, TaskNotify::Started);
+      }
+
+      TaskEffect::StatusChanged(status) => {
+        if let Some(task) = self.tasks.get_mut(&task_id) {
+          task.status = status;
+        }
+        self.notify_listeners(task_id, TaskNotify::StatusChanged(status));
       }
 
       TaskEffect::Stopped(exit_code) => {
@@ -374,9 +414,14 @@ impl Kernel {
 
   fn is_ready_to_quit(&self) -> bool {
     for task in self.tasks.values() {
+      if !task.stop_on_quit {
+        continue;
+      }
       match task.status {
-        TaskStatus::Running if task.stop_on_quit => return false,
-        _ => (),
+        TaskStatus::Starting | TaskStatus::Running | TaskStatus::Unhealthy => {
+          return false;
+        }
+        TaskStatus::NotStarted | TaskStatus::Exited(_) => (),
       }
     }
     true

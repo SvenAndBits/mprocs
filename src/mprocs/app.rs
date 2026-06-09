@@ -43,7 +43,7 @@ use crate::{
     },
     state::{Scope, State},
     ui_keymap::render_keymap,
-    ui_procs::{procs_check_hit, procs_get_clicked_index, render_procs},
+    ui_procs::{ClickTarget, procs_check_hit, procs_get_clicked_index, render_procs},
     ui_term::{render_term, term_check_hit},
     ui_zoom_tip::render_zoom_tip,
     widgets::list::ListState,
@@ -537,13 +537,28 @@ impl App {
           match mouse_event.kind {
             MouseEventKind::Down(btn) => match btn {
               MouseButton::Left => {
-                if let Some(index) = procs_get_clicked_index(
+                if let Some(target) = procs_get_clicked_index(
                   layout.procs.into(),
                   mouse_event.x as u16,
                   mouse_event.y as u16,
                   &self.state,
                 ) {
-                  self.state.select_proc(index);
+                  match target {
+                    ClickTarget::Proc(idx) => {
+                      if let Some(p) = self.state.procs.get_mut(idx) {
+                        p.focused_child = None;
+                      }
+                      self.state.select_proc(idx);
+                    }
+                    ClickTarget::Child { proc_idx, child_idx } => {
+                      self.state.select_proc(proc_idx);
+                      if let Some(p) =
+                        self.state.procs.get_mut(proc_idx)
+                      {
+                        p.focused_child = Some(child_idx);
+                      }
+                    }
+                  }
                 }
               }
               MouseButton::Right | MouseButton::Middle => (),
@@ -658,25 +673,31 @@ impl App {
         loop_action.render();
       }
       AppEvent::NextProc => {
-        let mut next = self.state.selected() + 1;
-        if next >= self.state.procs.len() {
-          next = 0;
-        }
-        self.state.select_proc(next);
+        focus_next_row(&mut self.state);
         loop_action.render();
       }
       AppEvent::PrevProc => {
-        let next = if self.state.selected() > 0 {
-          self.state.selected() - 1
-        } else {
-          self.state.procs.len().saturating_sub(1)
-        };
-        self.state.select_proc(next);
+        focus_prev_row(&mut self.state);
         loop_action.render();
       }
       AppEvent::SelectProc { index } => {
+        // External API: index is a proc index. Reset child focus.
+        if let Some(p) = self.state.procs.get_mut(*index) {
+          p.focused_child = None;
+        }
         self.state.select_proc(*index);
         loop_action.render();
+      }
+      AppEvent::ToggleProcChildren => {
+        if let Some(proc) = self.state.get_current_proc_mut() {
+          if !proc.children.is_empty() {
+            proc.expanded = !proc.expanded;
+            if !proc.expanded {
+              proc.focused_child = None;
+            }
+            loop_action.render();
+          }
+        }
       }
 
       AppEvent::StartProc => {
@@ -699,6 +720,30 @@ impl App {
       }
       AppEvent::RestartProc => {
         if let Some(proc) = self.state.get_current_proc_mut() {
+          // When a hook/check child is focused, `r` re-runs that single
+          // item instead of restarting the whole proc.
+          if let Some(child_idx) = proc.focused_child {
+            if let Some(child) = proc.children.get(child_idx) {
+              use crate::mprocs::proc::children::ChildKind;
+              use crate::mprocs::proc::msg::ProcMsg;
+              let proc_id = proc.id;
+              let cmd = match child.kind {
+                ChildKind::Hook(event) => {
+                  Some(TaskCmd::msg(ProcMsg::RerunHook(event)))
+                }
+                ChildKind::Check(idx) => {
+                  Some(TaskCmd::msg(ProcMsg::RerunCheck(idx)))
+                }
+                // Synthetic row — there's nothing to re-run.
+                ChildKind::Deps => None,
+              };
+              if let Some(cmd) = cmd {
+                pc.send(KernelCommand::TaskCmd(proc_id, cmd));
+              }
+              loop_action.render();
+              return;
+            }
+          }
           proc.target_state = TargetState::Started;
           if proc.is_up() {
             pc.send(KernelCommand::TaskCmd(proc.id, TaskCmd::Stop));
@@ -810,6 +855,9 @@ impl App {
           autorestart: false,
           stop: StopSignal::default(),
           deps: Vec::new(),
+          vars: std::collections::HashMap::new(),
+          healthchecks: Vec::new(),
+          hooks: crate::mprocs::proc_health::HookSet::default(),
           mouse_scroll_speed: self.config.mouse_scroll_speed,
           scrollback_len: self.config.scrollback_len,
           log: self.config.proc_log.clone(),
@@ -1058,9 +1106,31 @@ impl App {
             }
           }
           loop_action.render();
+        } else if update_child_status(
+          &mut self.state.procs,
+          task_id,
+          crate::mprocs::proc::children::ChildStatus::Running,
+        ) {
+          loop_action.render();
+        }
+      }
+      TaskNotify::StatusChanged(status) => {
+        if let Some(proc) = self.state.get_proc_mut(task_id) {
+          proc.status = status;
+          loop_action.render();
         }
       }
       TaskNotify::Stopped(exit_code) => {
+        if update_child_status(
+          &mut self.state.procs,
+          task_id,
+          crate::mprocs::proc::children::ChildStatus::LastExit(
+            exit_code as i32,
+          ),
+        ) {
+          loop_action.render();
+          return;
+        }
         if let Some(proc) = self.state.get_proc_mut(task_id) {
           proc.status = TaskStatus::Exited(exit_code);
 
@@ -1186,4 +1256,116 @@ pub async fn server_main(
   app.run().await?;
 
   Ok(())
+}
+
+/// Find a hook/check child by task id across all procs and update its
+/// per-row status. Returns true if a match was found.
+fn update_child_status(
+  procs: &mut [crate::mprocs::proc::view::ProcView],
+  task_id: TaskId,
+  status: crate::mprocs::proc::children::ChildStatus,
+) -> bool {
+  use crate::mprocs::proc::children::ChildStatus;
+  for proc in procs.iter_mut() {
+    for child in proc.children.iter_mut() {
+      if child.task_id == Some(task_id) {
+        // Track `last_stable_status` for the RUN-flicker debounce —
+        // any non-Running status is "stable"; Running is a transient
+        // we may want to suppress visually.
+        if !matches!(status, ChildStatus::Running) {
+          child.last_stable_status = status;
+        }
+        child.status = status;
+        child.status_changed_at = Some(std::time::Instant::now());
+        return true;
+      }
+    }
+  }
+  false
+}
+
+/// Move focus to the next visible row in the sidebar tree.
+///
+/// Iteration order: for each proc, the proc row, then (if expanded) each of
+/// its child rows, then the next proc. Wraps around at the end.
+fn focus_next_row(state: &mut crate::mprocs::state::State) {
+  if state.procs.is_empty() {
+    return;
+  }
+  let cur_proc = state.selected();
+  let cur_child = state
+    .procs
+    .get(cur_proc)
+    .and_then(|p| p.focused_child);
+  if let Some(p) = state.procs.get(cur_proc) {
+    if p.expanded && !p.children.is_empty() {
+      match cur_child {
+        None => {
+          if let Some(p) = state.procs.get_mut(cur_proc) {
+            p.focused_child = Some(0);
+          }
+          return;
+        }
+        Some(i) if i + 1 < p.children.len() => {
+          if let Some(p) = state.procs.get_mut(cur_proc) {
+            p.focused_child = Some(i + 1);
+          }
+          return;
+        }
+        _ => {}
+      }
+    }
+  }
+  // Move to next proc.
+  if let Some(p) = state.procs.get_mut(cur_proc) {
+    p.focused_child = None;
+  }
+  let next = (cur_proc + 1) % state.procs.len();
+  state.select_proc(next);
+}
+
+/// Inverse of `focus_next_row`.
+fn focus_prev_row(state: &mut crate::mprocs::state::State) {
+  if state.procs.is_empty() {
+    return;
+  }
+  let cur_proc = state.selected();
+  let cur_child = state
+    .procs
+    .get(cur_proc)
+    .and_then(|p| p.focused_child);
+  // First try to step backwards within the current proc's children.
+  match cur_child {
+    Some(0) => {
+      if let Some(p) = state.procs.get_mut(cur_proc) {
+        p.focused_child = None;
+      }
+      return;
+    }
+    Some(i) => {
+      if let Some(p) = state.procs.get_mut(cur_proc) {
+        p.focused_child = Some(i - 1);
+      }
+      return;
+    }
+    None => {}
+  }
+  // Move to previous proc (and, if it's expanded with children, land on
+  // its last child so navigation feels symmetric with NextProc).
+  let prev = if cur_proc == 0 {
+    state.procs.len() - 1
+  } else {
+    cur_proc - 1
+  };
+  if let Some(p) = state.procs.get_mut(cur_proc) {
+    p.focused_child = None;
+  }
+  state.select_proc(prev);
+  if let Some(p) = state.procs.get_mut(prev) {
+    if p.expanded && !p.children.is_empty() {
+      p.focused_child = Some(p.children.len() - 1);
+    } else {
+      p.focused_child = None;
+    }
+  }
 }

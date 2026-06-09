@@ -1,0 +1,76 @@
+# Example: health checks, dependencies, vars and lifecycle hooks.
+#
+# Demonstrates the new fields:
+#   - `healthchecks:` (top-level) — reusable named templates
+#   - `vars:` (per-proc) — substituted as %KEY% in shell/cmd/cwd/env, and
+#     into the cmd of every healthcheck/hook on the same proc
+#   - `healthchecks:` (per-proc) — list of named refs and/or inline checks;
+#     AND semantics (proc is healthy only when all checks pass)
+#   - `hooks:` — started / healthy / unhealthy / stopped / failed.
+#     Blocking by default; opt-in `async: true` to detach.
+
+healthchecks:
+  is_port_open:
+    cmd: "nc -z localhost %PORT%"
+    interval: 2s
+    timeout: 3s
+    start_period: 3s
+    retries: 10
+  is_database_ready:
+    cmd: "pg_isready -h localhost -p %PORT%"
+    interval: 2s
+    timeout: 3s
+    start_period: 5s
+    retries: 10
+  is_file_present:
+    cmd: "test -f %FILE%"
+    interval: 2s
+    start_period: 5s
+    retries: 30
+
+procs:
+  start:database:
+    shell: "pnpm run start:database"
+    autostart: true
+    vars:
+      PORT: 5432
+    healthchecks: [is_port_open, is_database_ready]
+
+  start:frontend:
+    shell: "pnpm run start:frontend"
+    autostart: true
+    vars:
+      BUILD_MARKER: "./dist/.build_ready"
+    hooks:
+      # Wipe the marker so portal waits for a fresh build, not a stale one.
+      started:
+        cmd: "rm -f %BUILD_MARKER%"
+    healthchecks:
+      - cmd: "test -f %BUILD_MARKER%"
+        interval: 2s
+        start_period: 5s
+        retries: 60
+
+  start:backend-api:
+    shell: "pnpm run start:backend-api"
+    autostart: true
+    deps: [start:database]
+    vars:
+      PORT: 3000
+    healthchecks:
+      - is_port_open
+      - cmd: "curl -fsS http://localhost:%PORT%/health"
+        interval: 2s
+        start_period: 5s
+
+  start:frontend-portal:
+    shell: "pnpm run start:frontend-portal"
+    autostart: true
+    deps: [start:backend-api, start:frontend]
+    vars:
+      PORT: 4200
+    healthchecks: [is_port_open]
+    hooks:
+      running:
+        cmd: "echo portal up at $(date)"
+        async: true

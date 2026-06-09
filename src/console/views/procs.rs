@@ -51,6 +51,8 @@ impl Pane for ProcsPane {
 
       let (status_char, status_color) = match task.status {
         TaskStatus::Running => (" ●", color!("#4ec55e")),
+        TaskStatus::Starting => (" ◐", color!("#e0c050")),
+        TaskStatus::Unhealthy => (" ●", color!("#e0a050")),
         TaskStatus::NotStarted => (" ○", color!("#888888")),
         TaskStatus::Exited(0) => (" ○", color!("#5a8ee0")),
         TaskStatus::Exited(_) => (" ○", color!("#e05a5a")),

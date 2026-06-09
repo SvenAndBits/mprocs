@@ -42,6 +42,7 @@ pub enum KernelCommand {
 
   // Task reporting
   TaskStarted,
+  TaskStatusChanged(TaskStatus),
   TaskStopped(u32),
 }
 
@@ -120,6 +121,18 @@ impl TaskContext {
       log::debug!(
         "Failed to send kernel message (task_id: {}). Channel is closed.",
         self.task_id.0,
+      );
+    }
+  }
+
+  /// Send a kernel message claiming a different `from` task id. Used by a
+  /// parent task to emit lifecycle events on behalf of one of its kernel
+  /// child tasks (e.g. health-check status updates).
+  pub fn send_for_task(&self, from: TaskId, command: KernelCommand) {
+    if let Err(_err) = self.sender.send(KernelMessage { from, command }) {
+      log::debug!(
+        "Failed to send kernel message for task_id: {}. Channel is closed.",
+        from.0,
       );
     }
   }
