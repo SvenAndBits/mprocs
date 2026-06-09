@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use crate::cfg::{CfgCx, CfgDoc, CfgObj};
+use crate::config::health::{
+  HealthCheckRegistry, HookRegistry, parse_hook_registry, parse_registry,
+};
 use crate::config::hook::{Hook, event_from_cfg};
 use crate::config::keymap::KeymapConfig;
 use crate::config::log::LogConfig;
@@ -17,6 +20,8 @@ pub struct Config {
   pub keymap: KeymapConfig,
   pub on_init: Option<Hook>,
   pub on_all_finished: Option<Hook>,
+  pub healthchecks: HealthCheckRegistry,
+  pub hooks: HookRegistry,
 }
 
 impl Config {
@@ -29,6 +34,8 @@ impl Config {
       keymap: KeymapConfig::default(),
       on_init: None,
       on_all_finished: None,
+      healthchecks: HealthCheckRegistry::new(),
+      hooks: HookRegistry::new(),
     }
   }
 
@@ -61,11 +68,20 @@ impl Config {
       let obj = doc.root().as_obj()?;
       config.apply(&obj, &cx)?;
       if let Some(node) = obj.get("procs") {
-        config.procs = node
+        let procs = node
           .as_obj()?
           .iter()
-          .map(|(path, proc)| proc_from_cfg(path.to_string(), &proc, &cx))
+          .map(|(path, proc)| {
+            proc_from_cfg(
+              path.to_string(),
+              &proc,
+              &cx,
+              &config.healthchecks,
+              &config.hooks,
+            )
+          })
           .collect::<Result<Vec<_>>>()?;
+        config.procs = procs;
       }
     }
 
@@ -86,6 +102,12 @@ impl Config {
     }
     if let Some(hook) = event_from_cfg(obj, "on_all_finished")? {
       self.on_all_finished = Some(hook);
+    }
+    if let Some(node) = obj.get("healthchecks") {
+      self.healthchecks.extend(parse_registry(&node)?);
+    }
+    if let Some(node) = obj.get("hooks") {
+      self.hooks.extend(parse_hook_registry(&node)?);
     }
     Ok(())
   }

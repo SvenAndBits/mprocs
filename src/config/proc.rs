@@ -4,6 +4,10 @@ use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
 use crate::cfg::{CfgCx, CfgNode, CfgObj};
+use crate::config::health::{
+  HealthCheckDef, HealthCheckRegistry, HookRegistry, HookSet, Vars,
+  parse_hooks, parse_proc_healthchecks, substitute_vars,
+};
 use crate::config::proc_log::ProcLogConfig;
 use crate::console::proc::StopSignal;
 use crate::parse_shell::split_argv;
@@ -27,6 +31,10 @@ pub struct ProcConfig {
   pub log: Option<ProcLogConfig>,
   pub scrollback_len: Option<usize>,
   pub mouse_scroll_speed: Option<usize>,
+
+  pub vars: Vars,
+  pub healthchecks: Vec<HealthCheckDef>,
+  pub hooks: HookSet,
 }
 
 impl ProcConfig {
@@ -55,6 +63,17 @@ impl ProcConfig {
       },
       scrollback_len: over.scrollback_len.or(self.scrollback_len),
       mouse_scroll_speed: over.mouse_scroll_speed.or(self.mouse_scroll_speed),
+      vars: {
+        let mut merged = self.vars;
+        merged.extend(over.vars);
+        merged
+      },
+      healthchecks: if over.healthchecks.is_empty() {
+        self.healthchecks
+      } else {
+        over.healthchecks
+      },
+      hooks: self.hooks.overlay(over.hooks),
     }
   }
 
@@ -93,6 +112,9 @@ pub(crate) fn parse_proc_settings(
   p.log = obj.optional("log", cx)?;
   p.scrollback_len = obj.optional("scrollback_len", cx)?;
   p.mouse_scroll_speed = obj.optional("mouse_scroll_speed", cx)?;
+  if let Some(vars) = obj.optional::<Vars>("vars", cx)? {
+    p.vars = vars;
+  }
   Ok(p)
 }
 
@@ -100,12 +122,20 @@ pub(crate) fn proc_from_cfg(
   path: String,
   node: &CfgNode<'_>,
   cx: &CfgCx,
+  hc_registry: &HealthCheckRegistry,
+  hook_registry: &HookRegistry,
 ) -> Result<ProcConfig> {
   let obj = node.as_obj()?;
   let mut p = parse_proc_settings(&obj, cx)?;
   p.path = path;
   p.cmd = Some(cmd_from_cfg(node)?);
   p.deps = obj.default("deps", Vec::new(), cx)?;
+  if let Some(hc) = obj.get("healthchecks") {
+    p.healthchecks = parse_proc_healthchecks(&hc, hc_registry)?;
+  }
+  if let Some(hooks) = obj.get("hooks") {
+    p.hooks = parse_hooks(&hooks, hook_registry)?;
+  }
   Ok(p)
 }
 
@@ -142,16 +172,21 @@ pub enum CmdConfig {
 
 impl From<&ProcConfig> for ProcessSpec {
   fn from(cfg: &ProcConfig) -> Self {
+    let vars = &cfg.vars;
     let mut cmd = match &cfg.cmd {
-      Some(CmdConfig::Cmd { cmd }) => ProcessSpec::from_argv(cmd.clone()),
-      Some(CmdConfig::Shell { shell }) => cmd_from_shell(shell),
+      Some(CmdConfig::Cmd { cmd }) => ProcessSpec::from_argv(
+        cmd.iter().map(|a| substitute_vars(a, vars)).collect(),
+      ),
+      Some(CmdConfig::Shell { shell }) => {
+        cmd_from_shell(&substitute_vars(shell, vars))
+      }
       None => ProcessSpec::from_argv(Vec::new()),
     };
 
     if let Some(env) = &cfg.env {
       for (k, v) in env {
         if let Some(v) = v {
-          cmd.env(k, v);
+          cmd.env(k, substitute_vars(v, vars));
         } else {
           cmd.env_remove(k);
         }
@@ -176,7 +211,7 @@ impl From<&ProcConfig> for ProcessSpec {
     }
 
     if let Some(cwd) = &cfg.cwd {
-      cmd.cwd(cwd.to_string_lossy());
+      cmd.cwd(substitute_vars(&cwd.to_string_lossy(), vars));
     } else if let Ok(cwd) = std::env::current_dir() {
       cmd.cwd(cwd.to_string_lossy());
     }

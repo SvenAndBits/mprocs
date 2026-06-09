@@ -1,4 +1,5 @@
 pub mod config;
+pub mod health;
 pub mod hook;
 pub mod keymap;
 pub mod legacy;

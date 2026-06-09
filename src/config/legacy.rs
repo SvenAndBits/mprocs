@@ -29,6 +29,8 @@ impl From<crate::mprocs::config::Config> for Config {
       keymap: KeymapConfig::default(),
       on_init: legacy.on_init.map(Hook::Action),
       on_all_finished: legacy.on_all_finished.map(Hook::Action),
+      healthchecks: Default::default(),
+      hooks: Default::default(),
     }
   }
 }
@@ -48,6 +50,9 @@ impl From<crate::mprocs::config::ProcConfig> for ProcConfig {
       log: legacy.log,
       scrollback_len: Some(legacy.scrollback_len),
       mouse_scroll_speed: Some(legacy.mouse_scroll_speed),
+      vars: Default::default(),
+      healthchecks: Default::default(),
+      hooks: Default::default(),
     }
   }
 }
