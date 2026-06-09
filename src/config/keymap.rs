@@ -135,6 +135,11 @@ impl KeymapConfig {
     s.keymap_add_p(Key::new(KeyCode::Char('z'), KeyMods::NONE), Action::Zoom);
 
     s.keymap_add_p(
+      Key::new(KeyCode::Tab, KeyMods::NONE),
+      Action::ToggleProcChildren,
+    );
+
+    s.keymap_add_p(
       Key::new(KeyCode::Char('?'), KeyMods::NONE),
       Action::ToggleKeymapWindow,
     );

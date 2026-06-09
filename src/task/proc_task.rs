@@ -124,19 +124,20 @@ pub fn spawn_proc_task_with_id(
   let vt = SharedVt::new(Parser::new(24, 80, scrollback_len));
   let task_vt = vt.clone();
 
+  let mut pending_children: Vec<PendingChild> = Vec::new();
   let mut check_vts: Vec<Option<SharedVt>> =
     Vec::with_capacity(healthchecks.len());
   let mut check_task_ids: Vec<Option<TaskId>> =
     Vec::with_capacity(healthchecks.len());
   for (i, def) in healthchecks.iter().enumerate() {
     let child_vt = new_child_vt();
-    let seg = format!("check_{}", sanitize_seg(&def.name));
-    let id = register_child_task(
+    let id = plan_child(
       parent,
       task_path.as_ref(),
-      &seg,
-      i,
+      &format!("check_{i}"),
+      Some(def.name.clone()),
       child_vt.clone(),
+      &mut pending_children,
     );
     check_vts.push(Some(child_vt));
     check_task_ids.push(id);
@@ -147,10 +148,14 @@ pub fn spawn_proc_task_with_id(
   for event in HOOK_EVENTS {
     if hooks.get(event).is_some() {
       let child_vt = new_child_vt();
-      let seg = format!("hook_{}", event.label());
-      if let Some(id) =
-        register_child_task(parent, task_path.as_ref(), &seg, 0, child_vt.clone())
-      {
+      if let Some(id) = plan_child(
+        parent,
+        task_path.as_ref(),
+        &format!("hook_{}", event.label()),
+        None,
+        child_vt.clone(),
+        &mut pending_children,
+      ) {
         hook_task_ids.insert(event, id);
       }
       hook_vts.insert(event, child_vt);
@@ -189,6 +194,27 @@ pub fn spawn_proc_task_with_id(
       proc_main(ctx, receiver, task_vt, runtime).await;
     },
   );
+
+  for child in pending_children {
+    parent.register_with_id(
+      child.id,
+      TaskDef {
+        stop_on_quit: false,
+        path: Some(child.path),
+        label: child.label,
+        vt: Some(child.vt),
+        ..Default::default()
+      },
+      Box::new(|_| Box::new(NoopTask)),
+    );
+  }
+}
+
+struct PendingChild {
+  id: TaskId,
+  path: TaskPath,
+  label: Option<String>,
+  vt: SharedVt,
 }
 
 struct ProcRuntime {
@@ -207,43 +233,24 @@ struct ProcRuntime {
   hook_task_ids: HashMap<HookEvent, TaskId>,
 }
 
-fn sanitize_seg(name: &str) -> String {
-  let s: String = name
-    .chars()
-    .map(|c| {
-      if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-        c
-      } else {
-        '_'
-      }
-    })
-    .collect();
-  if s.is_empty() { "_".to_string() } else { s }
-}
-
-fn register_child_task(
+fn plan_child(
   parent: &TaskContext,
   parent_path: Option<&TaskPath>,
   seg: &str,
-  disambig: usize,
+  label: Option<String>,
   vt: SharedVt,
+  out: &mut Vec<PendingChild>,
 ) -> Option<TaskId> {
   let parent_path = parent_path?;
-  let candidate = format!("{}/{}", parent_path.as_str(), seg);
-  let path = TaskPath::new(candidate.clone())
-    .or_else(|_| TaskPath::new(format!("{candidate}_{disambig}")))
-    .ok()?;
+  let path =
+    TaskPath::new(format!("{}/{}", parent_path.as_str(), seg)).ok()?;
   let id = parent.alloc_id();
-  parent.register_with_id(
+  out.push(PendingChild {
     id,
-    TaskDef {
-      stop_on_quit: false,
-      path: Some(path),
-      vt: Some(vt),
-      ..Default::default()
-    },
-    Box::new(|_| Box::new(NoopTask)),
-  );
+    path,
+    label,
+    vt,
+  });
   Some(id)
 }
 

@@ -19,10 +19,15 @@ use crate::{
       quit::QuitModal, remove_proc::RemoveProcModal,
       rename_proc::RenameProcModal,
     },
+    proc::child::{
+      ChildKind, ChildRow, child_kind_from_segment, is_child_path,
+    },
     proc::view::ProcView,
     state::{Scope, State},
     ui_keymap::render_keymap,
-    ui_procs::{procs_check_hit, procs_get_clicked_index, render_procs},
+    ui_procs::{
+      ClickTarget, procs_check_hit, procs_get_clicked_index, render_procs,
+    },
     ui_term::{render_term, term_check_hit},
     ui_zoom_tip::render_zoom_tip,
     widgets::list::ListState,
@@ -47,9 +52,11 @@ use crate::{
   process::process_spec::ProcessSpec,
   protocol::{CltToSrv, SrvToClt},
   task::{
+    child_vt::new_child_vt,
     logger::{LogResolver, LogSink},
     proc_task::{
-      DuplicateProc, ProcInput, ProcTaskConfig, spawn_proc_task_with_id,
+      DuplicateProc, ProcInput, ProcMsg, ProcTaskConfig,
+      spawn_proc_task_with_id,
     },
   },
   term::{
@@ -243,25 +250,191 @@ impl App {
     ));
   }
 
+  fn deps_for_path(&self, path: Option<&TaskPath>) -> Vec<String> {
+    path
+      .map(|p| p.name())
+      .and_then(|name| self.config.procs.iter().find(|p| p.path == name))
+      .map(|cfg| cfg.deps.clone())
+      .unwrap_or_default()
+  }
+
+  fn make_proc_view(
+    &self,
+    id: TaskId,
+    name: String,
+    status: TaskStatus,
+    vt: crate::kernel::kernel_message::SharedVt,
+    path: Option<TaskPath>,
+  ) -> ProcView {
+    let deps = self.deps_for_path(path.as_ref());
+    let mut pv = ProcView::new(id, name, status, vt, path, deps.clone());
+    if !deps.is_empty() {
+      pv.children.push(ChildRow::new(
+        None,
+        ChildKind::Deps,
+        "deps".to_string(),
+        new_child_vt(),
+      ));
+    }
+    pv
+  }
+
+  fn attach_child(
+    &mut self,
+    task_id: TaskId,
+    path: &TaskPath,
+    label: Option<String>,
+    status: TaskStatus,
+    vt: crate::kernel::kernel_message::SharedVt,
+  ) {
+    let Some(parent_path) = path.parent() else {
+      return;
+    };
+    let Some(kind) = child_kind_from_segment(path.name()) else {
+      return;
+    };
+    let display = match kind {
+      ChildKind::Hook(e) => e.label().to_string(),
+      ChildKind::Check(_) => {
+        label.unwrap_or_else(|| path.name().to_string())
+      }
+      ChildKind::Deps => "deps".to_string(),
+    };
+    if let Some(parent) = self
+      .state
+      .procs
+      .iter_mut()
+      .find(|p| p.path.as_ref() == Some(&parent_path))
+    {
+      if parent.children.iter().any(|c| c.task_id == Some(task_id)) {
+        return;
+      }
+      let mut row = ChildRow::new(Some(task_id), kind, display, vt);
+      row.apply_task_status(status);
+      parent.children.push(row);
+    }
+  }
+
+  fn update_child_status(
+    &mut self,
+    task_id: TaskId,
+    status: TaskStatus,
+  ) -> bool {
+    for proc in &mut self.state.procs {
+      if let Some(child) = proc.find_child_mut(task_id) {
+        child.apply_task_status(status);
+        return true;
+      }
+    }
+    false
+  }
+
+  fn focus_next_row(&mut self) {
+    let sel = self.state.selected();
+    let Some(proc) = self.state.procs.get(sel) else {
+      return;
+    };
+    if proc.expanded && !proc.children.is_empty() {
+      let next_child = match proc.focused_child {
+        None => Some(0),
+        Some(i) if i + 1 < proc.children.len() => Some(i + 1),
+        Some(_) => None,
+      };
+      if let Some(ci) = next_child {
+        if let Some(p) = self.state.procs.get_mut(sel) {
+          p.focused_child = Some(ci);
+        }
+        return;
+      }
+    }
+    if let Some(p) = self.state.procs.get_mut(sel) {
+      p.focused_child = None;
+    }
+    let mut next = sel + 1;
+    if next >= self.state.procs.len() {
+      next = 0;
+    }
+    if let Some(p) = self.state.procs.get_mut(next) {
+      p.focused_child = None;
+    }
+    self.state.select_proc(next);
+  }
+
+  fn focus_prev_row(&mut self) {
+    let sel = self.state.selected();
+    let Some(proc) = self.state.procs.get(sel) else {
+      return;
+    };
+    match proc.focused_child {
+      Some(0) => {
+        if let Some(p) = self.state.procs.get_mut(sel) {
+          p.focused_child = None;
+        }
+        return;
+      }
+      Some(i) => {
+        if let Some(p) = self.state.procs.get_mut(sel) {
+          p.focused_child = Some(i - 1);
+        }
+        return;
+      }
+      None => {}
+    }
+    let prev = if sel > 0 {
+      sel - 1
+    } else {
+      self.state.procs.len().saturating_sub(1)
+    };
+    let land_child = self
+      .state
+      .procs
+      .get(prev)
+      .filter(|p| p.expanded && !p.children.is_empty())
+      .map(|p| p.children.len() - 1);
+    if let Some(p) = self.state.procs.get_mut(prev) {
+      p.focused_child = land_child;
+    }
+    self.state.select_proc(prev);
+  }
+
   async fn refresh_procs(&mut self) {
     let resp = self.pc.query(KernelQuery::ListTasks(None)).await;
     let Ok(KernelQueryResponse::TaskList(list)) = resp else {
       return;
     };
     let size = self.get_layout().term_area();
-    for task in list {
-      let Some(vt) = task.vt else {
+    for task in &list {
+      let Some(vt) = task.vt.clone() else {
         continue;
       };
+      if task.path.as_ref().is_some_and(is_child_path) {
+        continue;
+      }
       if self.state.procs.iter().any(|p| p.id() == task.id) {
         continue;
       }
-      let name = proc_display_name(task.label, task.path.as_ref(), task.id);
-      self
-        .state
-        .procs
-        .push(ProcView::new(task.id, name, task.status, vt));
+      let name =
+        proc_display_name(task.label.clone(), task.path.as_ref(), task.id);
+      let pv =
+        self.make_proc_view(task.id, name, task.status, vt, task.path.clone());
+      self.state.procs.push(pv);
       self.observe_proc(task.id, size);
+    }
+    for task in &list {
+      let Some(vt) = task.vt.clone() else {
+        continue;
+      };
+      if let Some(path) = &task.path {
+        if is_child_path(path) {
+          self.attach_child(
+            task.id,
+            path,
+            task.label.clone(),
+            task.status,
+            vt,
+          );
+        }
+      }
     }
   }
 
@@ -443,13 +616,29 @@ impl App {
           match mouse_event.kind {
             MouseEventKind::Down(btn) => match btn {
               MouseButton::Left => {
-                if let Some(index) = procs_get_clicked_index(
+                if let Some(target) = procs_get_clicked_index(
                   layout.procs.into(),
                   mouse_event.x as u16,
                   mouse_event.y as u16,
                   &self.state,
                 ) {
-                  self.state.select_proc(index);
+                  match target {
+                    ClickTarget::Proc(idx) => {
+                      if let Some(p) = self.state.procs.get_mut(idx) {
+                        p.focused_child = None;
+                      }
+                      self.state.select_proc(idx);
+                    }
+                    ClickTarget::Child {
+                      proc_idx,
+                      child_idx,
+                    } => {
+                      self.state.select_proc(proc_idx);
+                      if let Some(p) = self.state.procs.get_mut(proc_idx) {
+                        p.focused_child = Some(child_idx);
+                      }
+                    }
+                  }
                 }
               }
               MouseButton::Right | MouseButton::Middle => (),
@@ -572,24 +761,28 @@ impl App {
         loop_action.render();
       }
       Action::NextProc => {
-        let mut next = self.state.selected() + 1;
-        if next >= self.state.procs.len() {
-          next = 0;
-        }
-        self.state.select_proc(next);
+        self.focus_next_row();
         loop_action.render();
       }
       Action::PrevProc => {
-        let next = if self.state.selected() > 0 {
-          self.state.selected() - 1
-        } else {
-          self.state.procs.len().saturating_sub(1)
-        };
-        self.state.select_proc(next);
+        self.focus_prev_row();
         loop_action.render();
       }
       Action::SelectProc { index } => {
+        if let Some(p) = self.state.procs.get_mut(*index) {
+          p.focused_child = None;
+        }
         self.state.select_proc(*index);
+        loop_action.render();
+      }
+      Action::ToggleProcChildren => {
+        let sel = self.state.selected();
+        if let Some(proc) = self.state.procs.get_mut(sel) {
+          proc.expanded = !proc.expanded;
+          if !proc.expanded {
+            proc.focused_child = None;
+          }
+        }
         loop_action.render();
       }
 
@@ -610,7 +803,26 @@ impl App {
       }
       Action::RestartProc => {
         if let Some(proc) = self.state.get_current_proc() {
-          restart_proc(&pc, proc, TaskCmd::Stop);
+          let rerun = proc
+            .focused_child
+            .and_then(|ci| proc.children.get(ci))
+            .map(|c| (proc.id, c.kind));
+          match rerun {
+            Some((proc_id, ChildKind::Hook(e))) => {
+              pc.send(KernelCommand::TaskCmd(
+                proc_id,
+                TaskCmd::msg(ProcMsg::RerunHook(e)),
+              ));
+            }
+            Some((proc_id, ChildKind::Check(i))) => {
+              pc.send(KernelCommand::TaskCmd(
+                proc_id,
+                TaskCmd::msg(ProcMsg::RerunCheck(i)),
+              ));
+            }
+            Some((_, ChildKind::Deps)) => {}
+            None => restart_proc(&pc, proc, TaskCmd::Stop),
+          }
         }
       }
       Action::RestartAll => {
@@ -863,14 +1075,19 @@ impl App {
         let Some(vt) = vt else {
           return;
         };
+        if let Some(path) = &path
+          && is_child_path(path)
+        {
+          self.attach_child(task_id, path, label, status, vt);
+          loop_action.render();
+          return;
+        }
         if self.state.procs.iter().any(|p| p.id() == task_id) {
           return;
         }
         let name = proc_display_name(label, path.as_ref(), task_id);
-        self
-          .state
-          .procs
-          .push(ProcView::new(task_id, name, status, vt));
+        let pv = self.make_proc_view(task_id, name, status, vt, path);
+        self.state.procs.push(pv);
         let size = self.get_layout().term_area();
         self.observe_proc(task_id, size);
         loop_action.render();
@@ -878,31 +1095,32 @@ impl App {
       TaskNotify::Started => {
         if let Some(proc) = self.state.get_proc_mut(task_id) {
           proc.status = TaskStatus::Running;
-          loop_action.render();
+        } else {
+          self.update_child_status(task_id, TaskStatus::Running);
         }
+        loop_action.render();
       }
       TaskNotify::StatusChanged(status) => {
         if let Some(proc) = self.state.get_proc_mut(task_id) {
           proc.status = status;
-          loop_action.render();
+        } else {
+          self.update_child_status(task_id, status);
         }
+        loop_action.render();
       }
       TaskNotify::Stopped(exit_code) => {
-        let known = if let Some(proc) = self.state.get_proc_mut(task_id) {
+        if let Some(proc) = self.state.get_proc_mut(task_id) {
           proc.status = TaskStatus::Exited(exit_code);
-          true
-        } else {
-          false
-        };
-        if known {
           if self.state.all_procs_down() {
             if let Some(hook) = &self.config.on_all_finished {
               let event = hook.as_action().clone();
               self.handle_event(loop_action, &event);
             }
           }
-          loop_action.render();
+        } else {
+          self.update_child_status(task_id, TaskStatus::Exited(exit_code));
         }
+        loop_action.render();
       }
       TaskNotify::Removed => {
         self.state.procs.retain(|p| p.id() != task_id);
