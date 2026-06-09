@@ -156,6 +156,7 @@ pub struct TaskHandle {
   pub pending_start: bool,
 
   pub autorestart: bool,
+  pub oneshot: bool,
   /// Desired run state, used to decide whether an exit triggers a restart.
   pub target: Target,
   pub last_start: Option<Instant>,
@@ -180,6 +181,7 @@ pub enum TaskStatus {
   Starting,
   Running,
   Unhealthy,
+  Completed,
   Exited(u32),
 }
 
@@ -192,6 +194,7 @@ pub struct TaskDef {
   pub status: TaskStatus,
   pub autostart: bool,
   pub autorestart: bool,
+  pub oneshot: bool,
   pub deps: Vec<TaskId>,
   pub path: Option<TaskPath>,
   pub label: Option<String>,
@@ -205,6 +208,7 @@ impl Default for TaskDef {
       status: TaskStatus::NotStarted,
       autostart: false,
       autorestart: false,
+      oneshot: false,
       deps: Vec::new(),
       path: None,
       label: None,

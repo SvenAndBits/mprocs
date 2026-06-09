@@ -46,6 +46,7 @@ impl From<crate::mprocs::config::ProcConfig> for ProcConfig {
       add_path: Some(legacy.add_path).filter(|p| !p.is_empty()),
       autostart: Some(legacy.autostart),
       autorestart: Some(legacy.autorestart),
+      oneshot: None,
       stop: Some(legacy.stop),
       log: legacy.log,
       scrollback_len: Some(legacy.scrollback_len),

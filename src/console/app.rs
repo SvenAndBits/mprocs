@@ -1105,6 +1105,13 @@ impl App {
       TaskNotify::StatusChanged(status) => {
         if let Some(proc) = self.state.get_proc_mut(task_id) {
           proc.status = status;
+          if matches!(status, TaskStatus::Completed)
+            && self.state.all_procs_down()
+            && let Some(hook) = &self.config.on_all_finished
+          {
+            let event = hook.as_action().clone();
+            self.handle_event(loop_action, &event);
+          }
         } else {
           self.update_child_status(task_id, status);
         }
@@ -1186,6 +1193,7 @@ fn proc_task_config(
     log,
     autostart: cfg.autostart(),
     autorestart: cfg.autorestart(),
+    oneshot: cfg.oneshot(),
     scrollback_len: cfg.scrollback_len(),
     mouse_scroll_speed: cfg.mouse_scroll_speed(),
     deps,

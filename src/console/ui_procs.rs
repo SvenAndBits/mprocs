@@ -125,7 +125,7 @@ fn deps_ready_counts(
   let total = proc.deps.len();
   for dep_name in &proc.deps {
     if let Some(dep) = all_procs.iter().find(|p| p.name() == dep_name)
-      && matches!(dep.status, TaskStatus::Running)
+      && matches!(dep.status, TaskStatus::Running | TaskStatus::Completed)
     {
       ready += 1;
     }
@@ -143,7 +143,10 @@ fn proc_is_waiting_for_deps(proc: &ProcView, all_procs: &[ProcView]) -> bool {
   for dep_name in &proc.deps {
     match all_procs.iter().find(|p| p.name() == dep_name) {
       Some(dep) => {
-        if !matches!(dep.status, TaskStatus::Running) {
+        if !matches!(
+          dep.status,
+          TaskStatus::Running | TaskStatus::Completed
+        ) {
           return true;
         }
       }
@@ -296,6 +299,9 @@ fn status_pill_for_proc<'a>(
       Cow::from(" UNHEALTHY "),
       base.set_bold(true).fg(Color::BRIGHT_RED),
     );
+  }
+  if matches!(proc.status, TaskStatus::Completed) {
+    return (Cow::from(" DONE "), base.set_bold(true).fg(Color::BRIGHT_GREEN));
   }
   if proc.is_up() {
     return (Cow::from(" UP "), base.set_bold(true).fg(Color::BRIGHT_GREEN));

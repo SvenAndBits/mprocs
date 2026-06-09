@@ -62,6 +62,7 @@ impl ChildRow {
       TaskStatus::NotStarted => ChildStatus::Idle,
       TaskStatus::Starting | TaskStatus::Running => ChildStatus::Running,
       TaskStatus::Unhealthy => ChildStatus::LastExit(1),
+      TaskStatus::Completed => ChildStatus::LastExit(0),
       TaskStatus::Exited(code) => ChildStatus::LastExit(code as i32),
     };
     self.set_status(mapped);

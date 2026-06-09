@@ -156,6 +156,7 @@ fn status_str(status: TaskStatus) -> String {
     TaskStatus::Running => "running".to_string(),
     TaskStatus::Starting => "starting".to_string(),
     TaskStatus::Unhealthy => "unhealthy".to_string(),
+    TaskStatus::Completed => "completed".to_string(),
     TaskStatus::NotStarted => "not-started".to_string(),
     TaskStatus::Exited(code) => format!("exited:{}", code),
   }

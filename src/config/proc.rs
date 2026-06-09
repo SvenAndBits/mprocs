@@ -27,6 +27,7 @@ pub struct ProcConfig {
   pub add_path: Option<Vec<PathBuf>>,
   pub autostart: Option<bool>,
   pub autorestart: Option<bool>,
+  pub oneshot: Option<bool>,
   pub stop: Option<StopSignal>,
   pub log: Option<ProcLogConfig>,
   pub scrollback_len: Option<usize>,
@@ -56,6 +57,7 @@ impl ProcConfig {
       add_path: over.add_path.or(self.add_path),
       autostart: over.autostart.or(self.autostart),
       autorestart: over.autorestart.or(self.autorestart),
+      oneshot: over.oneshot.or(self.oneshot),
       stop: over.stop.or(self.stop),
       log: match (over.log, self.log) {
         (Some(over), Some(base)) => Some(base.merged(&over)),
@@ -83,6 +85,9 @@ impl ProcConfig {
   pub fn autorestart(&self) -> bool {
     self.autorestart.unwrap_or(false)
   }
+  pub fn oneshot(&self) -> bool {
+    self.oneshot.unwrap_or(false)
+  }
   pub fn stop(&self) -> StopSignal {
     self.stop.clone().unwrap_or_default()
   }
@@ -108,6 +113,7 @@ pub(crate) fn parse_proc_settings(
   p.add_path = obj.optional("add_path", cx)?;
   p.autostart = obj.optional("autostart", cx)?;
   p.autorestart = obj.optional("autorestart", cx)?;
+  p.oneshot = obj.optional("oneshot", cx)?;
   p.stop = obj.optional("stop", cx)?;
   p.log = obj.optional("log", cx)?;
   p.scrollback_len = obj.optional("scrollback_len", cx)?;
@@ -135,6 +141,12 @@ pub(crate) fn proc_from_cfg(
   }
   if let Some(hooks) = obj.get("hooks") {
     p.hooks = parse_hooks(&hooks, hook_registry)?;
+  }
+  if p.oneshot() && !p.healthchecks.is_empty() {
+    bail!(obj.error(
+      "a `oneshot` process cannot also define `healthchecks` (one gates on \
+       exit, the other on a check passing)"
+    ));
   }
   Ok(p)
 }

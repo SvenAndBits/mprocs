@@ -70,7 +70,9 @@ impl ProcView {
       TaskStatus::Starting
       | TaskStatus::Running
       | TaskStatus::Unhealthy => true,
-      TaskStatus::NotStarted | TaskStatus::Exited(_) => false,
+      TaskStatus::NotStarted
+      | TaskStatus::Completed
+      | TaskStatus::Exited(_) => false,
     }
   }
 

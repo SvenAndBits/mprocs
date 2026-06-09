@@ -211,6 +211,12 @@ fn dep_row_visuals(
       Cow::Borrowed("UNHEALTHY"),
       Color::BRIGHT_RED,
     ),
+    TaskStatus::Completed => (
+      "✓",
+      Color::BRIGHT_GREEN,
+      Cow::Borrowed("DONE"),
+      Color::BRIGHT_GREEN,
+    ),
     TaskStatus::NotStarted => (
       "—",
       Color::BRIGHT_BLACK,

@@ -92,6 +92,7 @@ impl Kernel {
       status: def.status,
       pending_start: false,
       autorestart: def.autorestart,
+      oneshot: def.oneshot,
       target: Target::None,
       last_start: None,
       deps: HashMap::new(),
@@ -404,24 +405,8 @@ impl Kernel {
           }
         }
 
-        if started && let Some(rev_deps) = self.rev_deps.get(&task_id).cloned()
-        {
-          for rev_dep_id in rev_deps {
-            if let Some(rev_dep) = self.tasks.get_mut(&rev_dep_id) {
-              if let Some(dep) = rev_dep.deps.get_mut(&task_id) {
-                dep.status = TaskStatus::Running;
-              }
-              if rev_dep.pending_start && Self::all_deps_ready(rev_dep) {
-                self
-                  .sender
-                  .send(KernelMessage {
-                    from: TaskId(0),
-                    command: KernelCommand::TaskCmd(rev_dep_id, TaskCmd::Start),
-                  })
-                  .log_ignore();
-              }
-            }
-          }
+        if started {
+          self.release_dependents(task_id, TaskStatus::Running);
         }
 
         let from_path = self.task_path(task_id);
@@ -451,36 +436,57 @@ impl Kernel {
 
       TaskEffect::Stopped(exit_code) => {
         let mut restart = false;
+        let mut completed = false;
         if let Some(task) = self.tasks.get_mut(&task_id) {
-          task.status = TaskStatus::Exited(exit_code);
           task.pending_start = false;
-          restart = decide_restart(
-            task.target,
-            task.autorestart,
-            exit_code,
-            task.last_start,
-          );
-          match task.target {
-            Target::Stopped => task.target = Target::None,
-            Target::None | Target::Started => {}
-          }
-        }
-
-        if let Some(rev_deps) = self.rev_deps.get(&task_id).cloned() {
-          for rev_dep_id in rev_deps {
-            if let Some(rev_dep) = self.tasks.get_mut(&rev_dep_id)
-              && let Some(dep) = rev_dep.deps.get_mut(&task_id)
-            {
-              dep.status = TaskStatus::Exited(exit_code);
+          if task.oneshot && exit_code == 0 {
+            task.status = TaskStatus::Completed;
+            task.target = Target::None;
+            completed = true;
+          } else {
+            task.status = TaskStatus::Exited(exit_code);
+            let target = if task.oneshot {
+              Target::None
+            } else {
+              task.target
+            };
+            restart = decide_restart(
+              target,
+              task.autorestart,
+              exit_code,
+              task.last_start,
+            );
+            match task.target {
+              Target::Stopped => task.target = Target::None,
+              Target::None | Target::Started => {}
             }
           }
         }
+
         let from_path = self.task_path(task_id);
-        self.notify_listeners(
-          task_id,
-          from_path,
-          TaskNotify::Stopped(exit_code),
-        );
+        if completed {
+          self.release_dependents(task_id, TaskStatus::Completed);
+          self.notify_listeners(
+            task_id,
+            from_path,
+            TaskNotify::StatusChanged(TaskStatus::Completed),
+          );
+        } else {
+          if let Some(rev_deps) = self.rev_deps.get(&task_id).cloned() {
+            for rev_dep_id in rev_deps {
+              if let Some(rev_dep) = self.tasks.get_mut(&rev_dep_id)
+                && let Some(dep) = rev_dep.deps.get_mut(&task_id)
+              {
+                dep.status = TaskStatus::Exited(exit_code);
+              }
+            }
+          }
+          self.notify_listeners(
+            task_id,
+            from_path,
+            TaskNotify::Stopped(exit_code),
+          );
+        }
 
         if restart {
           self
@@ -634,10 +640,31 @@ impl Kernel {
   }
 
   fn all_deps_ready(task: &TaskHandle) -> bool {
-    task
-      .deps
-      .values()
-      .all(|dep| dep.status == TaskStatus::Running)
+    task.deps.values().all(|dep| {
+      matches!(dep.status, TaskStatus::Running | TaskStatus::Completed)
+    })
+  }
+
+  fn release_dependents(&mut self, task_id: TaskId, dep_status: TaskStatus) {
+    let Some(rev_deps) = self.rev_deps.get(&task_id).cloned() else {
+      return;
+    };
+    for rev_dep_id in rev_deps {
+      if let Some(rev_dep) = self.tasks.get_mut(&rev_dep_id) {
+        if let Some(dep) = rev_dep.deps.get_mut(&task_id) {
+          dep.status = dep_status;
+        }
+        if rev_dep.pending_start && Self::all_deps_ready(rev_dep) {
+          self
+            .sender
+            .send(KernelMessage {
+              from: TaskId(0),
+              command: KernelCommand::TaskCmd(rev_dep_id, TaskCmd::Start),
+            })
+            .log_ignore();
+        }
+      }
+    }
   }
 }
 
@@ -1077,6 +1104,100 @@ mod tests {
       .await
       .expect("timed out waiting for kernel to quit")
       .unwrap();
+  }
+
+  struct InstantCompleteTask;
+
+  impl Task for InstantCompleteTask {
+    fn handle_cmd(&mut self, cmd: TaskCmd, fx: &mut Effects) {
+      if let TaskCmd::Start = cmd {
+        fx.stopped(0);
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn oneshot_success_releases_dependents() {
+    let mut kernel = Kernel::new();
+    let pc = kernel.context();
+
+    let provider_id = kernel.register_task(
+      TaskDef {
+        oneshot: true,
+        ..Default::default()
+      },
+      |_| Box::new(InstantCompleteTask),
+    );
+
+    let (mut dependent_rx, dependent_task) = recording_task();
+    let dependent_id = kernel.register_task(
+      TaskDef {
+        deps: vec![provider_id],
+        ..Default::default()
+      },
+      dependent_task,
+    );
+
+    let kernel_task = tokio::spawn(kernel.run());
+
+    pc.send(KernelCommand::TaskCmd(dependent_id, TaskCmd::Start));
+    flush_kernel(&pc).await;
+    assert_no_cmd(&mut dependent_rx);
+
+    pc.send(KernelCommand::TaskCmd(provider_id, TaskCmd::Start));
+    assert_eq!(recv_cmd(&mut dependent_rx).await, RecordedCmd::Start);
+
+    pc.send(KernelCommand::Quit);
+    tokio::time::timeout(Duration::from_secs(1), kernel_task)
+      .await
+      .expect("timed out waiting for kernel to quit")
+      .unwrap();
+  }
+
+  #[tokio::test]
+  async fn failed_oneshot_keeps_dependents_gated() {
+    let mut kernel = Kernel::new();
+    let pc = kernel.context();
+
+    let provider_id = kernel.register_task(
+      TaskDef {
+        oneshot: true,
+        ..Default::default()
+      },
+      |_| Box::new(FailOnStartTask),
+    );
+
+    let (mut dependent_rx, dependent_task) = recording_task();
+    let dependent_id = kernel.register_task(
+      TaskDef {
+        deps: vec![provider_id],
+        ..Default::default()
+      },
+      dependent_task,
+    );
+
+    let kernel_task = tokio::spawn(kernel.run());
+
+    pc.send(KernelCommand::TaskCmd(dependent_id, TaskCmd::Start));
+    pc.send(KernelCommand::TaskCmd(provider_id, TaskCmd::Start));
+    flush_kernel(&pc).await;
+    assert_no_cmd(&mut dependent_rx);
+
+    pc.send(KernelCommand::Quit);
+    tokio::time::timeout(Duration::from_secs(1), kernel_task)
+      .await
+      .expect("timed out waiting for kernel to quit")
+      .unwrap();
+  }
+
+  struct FailOnStartTask;
+
+  impl Task for FailOnStartTask {
+    fn handle_cmd(&mut self, cmd: TaskCmd, fx: &mut Effects) {
+      if let TaskCmd::Start = cmd {
+        fx.stopped(1);
+      }
+    }
   }
 
   #[tokio::test]

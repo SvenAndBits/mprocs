@@ -64,6 +64,7 @@ pub struct ProcTaskConfig {
   pub log: Option<LogResolver>,
   pub autostart: bool,
   pub autorestart: bool,
+  pub oneshot: bool,
   pub scrollback_len: usize,
   pub mouse_scroll_speed: usize,
   pub deps: Vec<TaskId>,
@@ -81,6 +82,7 @@ impl ProcTaskConfig {
       log: None,
       autostart: true,
       autorestart: false,
+      oneshot: false,
       scrollback_len: 1000,
       mouse_scroll_speed: 5,
       deps: Vec::new(),
@@ -113,6 +115,7 @@ pub fn spawn_proc_task_with_id(
     log,
     autostart,
     autorestart,
+    oneshot,
     scrollback_len,
     mouse_scroll_speed,
     deps,
@@ -169,6 +172,7 @@ pub fn spawn_proc_task_with_id(
     scrollback_len,
     mouse_scroll_speed,
     autorestart,
+    oneshot,
     vars,
     healthchecks,
     hooks,
@@ -184,6 +188,7 @@ pub fn spawn_proc_task_with_id(
       stop_on_quit: true,
       autostart,
       autorestart,
+      oneshot,
       deps,
       path: task_path,
       label,
@@ -224,6 +229,7 @@ struct ProcRuntime {
   scrollback_len: usize,
   mouse_scroll_speed: usize,
   autorestart: bool,
+  oneshot: bool,
   vars: Vars,
   healthchecks: Vec<HealthCheckDef>,
   hooks: HookSet,
@@ -267,6 +273,7 @@ async fn proc_main(
     scrollback_len,
     mouse_scroll_speed,
     autorestart,
+    oneshot,
     vars,
     healthchecks,
     hooks,
@@ -367,7 +374,11 @@ async fn proc_main(
                 }
                 continue;
               }
-              if healthchecks.is_empty() {
+              if oneshot {
+                ctx.send(KernelCommand::TaskStatusChanged(
+                  TaskStatus::Starting,
+                ));
+              } else if healthchecks.is_empty() {
                 ctx.send(KernelCommand::TaskStarted);
                 reported_running = true;
               } else {
@@ -478,6 +489,7 @@ async fn proc_main(
                   log: None,
                   autostart: true,
                   autorestart,
+                  oneshot,
                   scrollback_len,
                   mouse_scroll_speed,
                   deps: Vec::new(),
