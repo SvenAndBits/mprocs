@@ -118,10 +118,50 @@ pub(crate) fn parse_proc_settings(
   p.log = obj.optional("log", cx)?;
   p.scrollback_len = obj.optional("scrollback_len", cx)?;
   p.mouse_scroll_speed = obj.optional("mouse_scroll_speed", cx)?;
-  if let Some(vars) = obj.optional::<Vars>("vars", cx)? {
+  if let Some(node) = obj.get("vars") {
+    let mut vars = Vars::new();
+    for (k, v) in node.as_obj()?.iter() {
+      vars.insert(k.to_string(), var_value(&v)?);
+    }
     p.vars = vars;
   }
   Ok(p)
+}
+
+fn var_value(node: &CfgNode<'_>) -> Result<String> {
+  use serde_yaml::Value;
+  match node.raw() {
+    Value::String(s) => Ok(s.clone()),
+    Value::Number(n) => Ok(n.to_string()),
+    Value::Bool(b) => Ok(b.to_string()),
+    _ => Err(node.error("var value must be a string, number, or bool")),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::cfg::{CfgCx, CfgPath};
+
+  #[test]
+  fn vars_accept_scalar_values() {
+    let raw: serde_yaml::Value =
+      serde_yaml::from_str("shell: echo hi\nvars:\n  PORT: 3000\n  FLAG: true\n  HOST: localhost\n")
+        .unwrap();
+    let node = CfgNode::new(&raw, CfgPath::root());
+    let cx = CfgCx::new(std::path::PathBuf::from("."));
+    let cfg = proc_from_cfg(
+      "web".to_string(),
+      &node,
+      &cx,
+      &Default::default(),
+      &Default::default(),
+    )
+    .unwrap();
+    assert_eq!(cfg.vars.get("PORT").map(String::as_str), Some("3000"));
+    assert_eq!(cfg.vars.get("FLAG").map(String::as_str), Some("true"));
+    assert_eq!(cfg.vars.get("HOST").map(String::as_str), Some("localhost"));
+  }
 }
 
 pub(crate) fn proc_from_cfg(
