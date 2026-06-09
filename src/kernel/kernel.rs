@@ -316,6 +316,9 @@ impl Kernel {
         KernelCommand::TaskStarted => {
           self.apply_effect(msg.from, TaskEffect::Started);
         }
+        KernelCommand::TaskStatusChanged(status) => {
+          self.apply_effect(msg.from, TaskEffect::StatusChanged(status));
+        }
         KernelCommand::TaskStopped(exit_code) => {
           self.apply_effect(msg.from, TaskEffect::Stopped(exit_code));
           if self.quitting && self.is_ready_to_quit() {
@@ -391,6 +394,27 @@ impl Kernel {
 
         let from_path = self.task_path(task_id);
         self.notify_listeners(task_id, from_path, TaskNotify::Started);
+      }
+
+      TaskEffect::StatusChanged(status) => {
+        if let Some(task) = self.tasks.get_mut(&task_id) {
+          task.status = status;
+        }
+        if let Some(rev_deps) = self.rev_deps.get(&task_id).cloned() {
+          for rev_dep_id in rev_deps {
+            if let Some(rev_dep) = self.tasks.get_mut(&rev_dep_id)
+              && let Some(dep) = rev_dep.deps.get_mut(&task_id)
+            {
+              dep.status = status;
+            }
+          }
+        }
+        let from_path = self.task_path(task_id);
+        self.notify_listeners(
+          task_id,
+          from_path,
+          TaskNotify::StatusChanged(status),
+        );
       }
 
       TaskEffect::Stopped(exit_code) => {
@@ -566,7 +590,11 @@ impl Kernel {
   fn is_ready_to_quit(&self) -> bool {
     for task in self.tasks.values() {
       match task.status {
-        TaskStatus::Running if task.stop_on_quit => return false,
+        TaskStatus::Starting | TaskStatus::Running | TaskStatus::Unhealthy
+          if task.stop_on_quit =>
+        {
+          return false;
+        }
         _ => (),
       }
     }

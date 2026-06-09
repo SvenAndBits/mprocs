@@ -881,6 +881,12 @@ impl App {
           loop_action.render();
         }
       }
+      TaskNotify::StatusChanged(status) => {
+        if let Some(proc) = self.state.get_proc_mut(task_id) {
+          proc.status = status;
+          loop_action.render();
+        }
+      }
       TaskNotify::Stopped(exit_code) => {
         let known = if let Some(proc) = self.state.get_proc_mut(task_id) {
           proc.status = TaskStatus::Exited(exit_code);

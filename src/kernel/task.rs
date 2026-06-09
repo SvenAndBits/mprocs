@@ -18,6 +18,7 @@ pub trait Task: Send + 'static {
 
 pub enum TaskEffect {
   Started,
+  StatusChanged(TaskStatus),
   Stopped(u32),
   Remove,
 }
@@ -31,6 +32,10 @@ impl Effects {
 
   pub fn started(&mut self) {
     self.0.push(TaskEffect::Started);
+  }
+
+  pub fn status_changed(&mut self, status: TaskStatus) {
+    self.0.push(TaskEffect::StatusChanged(status));
   }
 
   pub fn stopped(&mut self, code: u32) {
@@ -85,6 +90,7 @@ pub enum TaskNotify {
     vt: Option<SharedVt>,
   },
   Started,
+  StatusChanged(TaskStatus),
   Stopped(u32),
   Removed,
   PathChanged(Option<TaskPath>, Option<TaskPath>),
@@ -103,6 +109,9 @@ impl fmt::Debug for TaskNotify {
         write!(f, "Added({:?}, {:?}, {:?})", path, label, status)
       }
       TaskNotify::Started => write!(f, "Started"),
+      TaskNotify::StatusChanged(status) => {
+        write!(f, "StatusChanged({:?})", status)
+      }
       TaskNotify::Stopped(code) => write!(f, "Stopped({})", code),
       TaskNotify::Removed => write!(f, "Removed"),
       TaskNotify::PathChanged(old, new) => {
@@ -129,6 +138,12 @@ impl Task for ChannelTask {
   fn handle_cmd(&mut self, cmd: TaskCmd, _fx: &mut Effects) {
     let _ = self.sender.send(cmd);
   }
+}
+
+pub struct NoopTask;
+
+impl Task for NoopTask {
+  fn handle_cmd(&mut self, _cmd: TaskCmd, _fx: &mut Effects) {}
 }
 
 pub struct TaskHandle {
@@ -162,7 +177,9 @@ pub enum Target {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
   NotStarted,
+  Starting,
   Running,
+  Unhealthy,
   Exited(u32),
 }
 

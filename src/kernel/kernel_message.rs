@@ -47,6 +47,7 @@ pub enum KernelCommand {
 
   // Task reporting
   TaskStarted,
+  TaskStatusChanged(TaskStatus),
   TaskStopped(u32),
 }
 
@@ -132,6 +133,15 @@ impl TaskContext {
 
   pub fn send_self_custom<T: Any + Send + 'static>(&self, custom: T) {
     self.send(KernelCommand::TaskCmd(self.task_id, TaskCmd::msg(custom)));
+  }
+
+  pub fn send_for_task(&self, from: TaskId, command: KernelCommand) {
+    if self.sender.send(KernelMessage { from, command }).is_err() {
+      log::debug!(
+        "Failed to send kernel message for task {}. Channel is closed.",
+        from.0,
+      );
+    }
   }
 
   pub fn alloc_id(&self) -> TaskId {

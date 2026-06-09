@@ -166,6 +166,8 @@ async fn handle_rpc(
                 .unwrap_or_else(|| format!("<task:{}>", t.id.0)),
               status: match t.status {
                 TaskStatus::Running => "running".to_string(),
+                TaskStatus::Starting => "starting".to_string(),
+                TaskStatus::Unhealthy => "unhealthy".to_string(),
                 TaskStatus::NotStarted => "not-started".to_string(),
                 TaskStatus::Exited(code) => format!("exited:{}", code),
               },
