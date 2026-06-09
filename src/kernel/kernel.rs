@@ -10,7 +10,8 @@ use crate::{error::ResultLogger, kernel::kernel_message::TaskContext};
 
 use super::{
   kernel_message::{
-    KernelCommand, KernelMessage, KernelQuery, KernelQueryResponse, TaskInfo,
+    KernelCommand, KernelMessage, KernelQuery, KernelQueryResponse, TaskDetail,
+    TaskInfo,
   },
   path_trie::PathTrie,
   sub_trie::SubTrie,
@@ -295,6 +296,37 @@ impl Kernel {
             }
             KernelQuery::ResolvePath(path) => {
               KernelQueryResponse::ResolvedPath(self.path_trie.resolve(&path))
+            }
+            KernelQuery::GetTask(path) => {
+              let detail = self.path_trie.resolve(&path).and_then(|id| {
+                self.tasks.get(&id).map(|handle| {
+                  let deps = handle
+                    .deps
+                    .iter()
+                    .map(|(dep_id, info)| {
+                      (self.task_path(*dep_id), info.status)
+                    })
+                    .collect();
+                  let children = self
+                    .path_trie
+                    .glob(&format!("{}/*", path))
+                    .into_iter()
+                    .filter_map(|(child_path, child_id)| {
+                      self
+                        .tasks
+                        .get(&child_id)
+                        .map(|c| (Some(child_path), c.status))
+                    })
+                    .collect();
+                  TaskDetail {
+                    path: handle.path.clone(),
+                    status: handle.status,
+                    deps,
+                    children,
+                  }
+                })
+              });
+              KernelQueryResponse::TaskDetail(detail)
             }
             KernelQuery::GetScreen(path) => {
               let screen_text =

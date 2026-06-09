@@ -58,6 +58,7 @@ pub enum KernelQuery {
   ResolvePath(TaskPath),
   /// Get the current screen content for a task (rendered as ANSI text).
   GetScreen(TaskPath),
+  GetTask(TaskPath),
 }
 
 pub enum KernelQueryResponse {
@@ -65,6 +66,15 @@ pub enum KernelQueryResponse {
   ResolvedPath(Option<TaskId>),
   /// ANSI-rendered screen content, or None if the task has no screen.
   Screen(Option<String>),
+  TaskDetail(Option<TaskDetail>),
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskDetail {
+  pub path: Option<TaskPath>,
+  pub status: TaskStatus,
+  pub deps: Vec<(Option<TaskPath>, TaskStatus)>,
+  pub children: Vec<(Option<TaskPath>, TaskStatus)>,
 }
 
 #[derive(Clone, Debug)]

@@ -74,6 +74,9 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       Command::new("screen")
         .about("Print the current screen of a task")
         .arg(Arg::new("path").required(true).help("Task path")),
+      Command::new("inspect")
+        .about("Show status, deps, and health checks of a task")
+        .arg(Arg::new("path").required(true).help("Task path")),
       Command::new("server").subcommands([
         Command::new("run")
           .arg(
@@ -215,6 +218,34 @@ pub async fn dekit_main() -> anyhow::Result<()> {
         }
         DkResponse::Screen(None) => {
           eprintln!("No screen content for this task.");
+        }
+        DkResponse::Error(e) => eprintln!("Error: {}", e),
+        _ => eprintln!("Unexpected response"),
+      }
+    }
+    Some(("inspect", sub_m)) => {
+      let working_dir = std::env::current_dir()?;
+      let path = sub_m.get_one::<String>("path").unwrap().clone();
+      let resp =
+        rpc_request(&working_dir, DkRequest::Inspect { path }, false).await?;
+      match resp {
+        DkResponse::TaskDetail(Some(detail)) => {
+          println!("{}\t{}", detail.path, detail.status);
+          if !detail.deps.is_empty() {
+            println!("deps:");
+            for d in &detail.deps {
+              println!("  {}\t{}", d.path, d.status);
+            }
+          }
+          if !detail.children.is_empty() {
+            println!("checks/hooks:");
+            for c in &detail.children {
+              println!("  {}\t{}", c.path, c.status);
+            }
+          }
+        }
+        DkResponse::TaskDetail(None) => {
+          eprintln!("No task at that path.");
         }
         DkResponse::Error(e) => eprintln!("Error: {}", e),
         _ => eprintln!("Unexpected response"),
