@@ -5,7 +5,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::{
   config::{
-    config::Config,
+    config::{Config, OnClientExit},
     proc::{CmdConfig, ProcConfig},
     proc_log::LogMode,
   },
@@ -530,6 +530,11 @@ impl App {
       ServerMessage::ClientDisconnected { client_id } => {
         self.clients.retain(|c| c.id != client_id);
         self.update_screen_size();
+        if self.clients.is_empty()
+          && matches!(self.config.on_client_exit, OnClientExit::StopAll)
+        {
+          self.begin_quit();
+        }
         loop_action.render();
       }
     }
@@ -540,6 +545,17 @@ impl App {
     if let Some(client) = self.clients.first_mut() {
       self.screen_size = client.size();
       self.grid.set_size(client.size());
+    }
+  }
+
+  fn begin_quit(&mut self) {
+    self.state.quitting = true;
+    for proc in self.state.procs.iter() {
+      if proc.is_up() {
+        self
+          .pc
+          .send(KernelCommand::TaskCmd(proc.id(), TaskCmd::Stop));
+      }
     }
   }
 
@@ -740,12 +756,7 @@ impl App {
         loop_action.render();
       }
       Action::Quit => {
-        self.state.quitting = true;
-        for proc in self.state.procs.iter() {
-          if proc.is_up() {
-            pc.send(KernelCommand::TaskCmd(proc.id(), TaskCmd::Stop));
-          }
-        }
+        self.begin_quit();
         loop_action.render();
       }
       Action::ForceQuit => {

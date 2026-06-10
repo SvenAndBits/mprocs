@@ -29,6 +29,7 @@ impl From<crate::mprocs::config::Config> for Config {
       keymap: KeymapConfig::default(),
       on_init: legacy.on_init.map(Hook::Action),
       on_all_finished: legacy.on_all_finished.map(Hook::Action),
+      on_client_exit: Default::default(),
       healthchecks: Default::default(),
       hooks: Default::default(),
     }

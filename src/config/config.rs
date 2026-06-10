@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use crate::cfg::{CfgCx, CfgDoc, CfgObj};
+use crate::cfg::{CfgCx, CfgDoc, CfgNode, CfgObj, FromCfg};
 use crate::config::health::{
   HealthCheckRegistry, HookRegistry, parse_hook_registry, parse_registry,
 };
@@ -20,8 +20,28 @@ pub struct Config {
   pub keymap: KeymapConfig,
   pub on_init: Option<Hook>,
   pub on_all_finished: Option<Hook>,
+  pub on_client_exit: OnClientExit,
   pub healthchecks: HealthCheckRegistry,
   pub hooks: HookRegistry,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OnClientExit {
+  #[default]
+  Detach,
+  StopAll,
+}
+
+impl FromCfg for OnClientExit {
+  fn from_cfg(node: &CfgNode<'_>, _cx: &CfgCx) -> Result<Self> {
+    match node.as_str()? {
+      "detach" => Ok(Self::Detach),
+      "stop_all" | "stop-all" => Ok(Self::StopAll),
+      other => Err(node.error(format!(
+        "on_client_exit must be 'detach' or 'stop_all', got '{other}'"
+      ))),
+    }
+  }
 }
 
 impl Config {
@@ -34,6 +54,7 @@ impl Config {
       keymap: KeymapConfig::default(),
       on_init: None,
       on_all_finished: None,
+      on_client_exit: OnClientExit::default(),
       healthchecks: HealthCheckRegistry::new(),
       hooks: HookRegistry::new(),
     }
@@ -102,6 +123,9 @@ impl Config {
     }
     if let Some(hook) = event_from_cfg(obj, "on_all_finished")? {
       self.on_all_finished = Some(hook);
+    }
+    if let Some(v) = obj.optional("on_client_exit", cx)? {
+      self.on_client_exit = v;
     }
     if let Some(node) = obj.get("healthchecks") {
       self.healthchecks.extend(parse_registry(&node)?);
