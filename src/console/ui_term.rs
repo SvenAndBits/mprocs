@@ -121,14 +121,6 @@ fn render_deps_view(area: Rect, grid: &mut Grid, state: &State, active: bool) {
   };
 
   let inner = area.inner(1);
-  let header = format!("Dependencies of {}", proc.name());
-  let header_row = Rect {
-    x: inner.x,
-    y: inner.y,
-    width: inner.width,
-    height: 1,
-  };
-  grid.draw_text(header_row, &header, Attrs::default().set_bold(true));
 
   let max_name_len = proc
     .deps
@@ -140,7 +132,7 @@ fn render_deps_view(area: Rect, grid: &mut Grid, state: &State, active: bool) {
     ((max_name_len + 4) as u16).min(inner.width.saturating_sub(20));
 
   for (i, dep_name) in proc.deps.iter().enumerate() {
-    let y = inner.y + 2 + i as u16;
+    let y = inner.y + i as u16;
     if y >= inner.y + inner.height {
       break;
     }
