@@ -138,6 +138,10 @@ impl KeymapConfig {
       Key::new(KeyCode::Tab, KeyMods::NONE),
       Action::ToggleProcChildren,
     );
+    s.keymap_add_p(
+      Key::new(KeyCode::Char(' '), KeyMods::NONE),
+      Action::ToggleProcChildren,
+    );
 
     s.keymap_add_p(
       Key::new(KeyCode::Char('?'), KeyMods::NONE),

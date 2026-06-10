@@ -133,6 +133,7 @@ pub struct App {
 
   screen_size: Size,
   clients: Vec<ClientHandle>,
+  last_proc_click: Option<(std::time::Instant, usize)>,
 }
 
 impl App {
@@ -668,11 +669,30 @@ impl App {
                         p.focused_child = None;
                       }
                       self.state.select_proc(idx);
+                      let now = std::time::Instant::now();
+                      let double = matches!(
+                        self.last_proc_click,
+                        Some((t, i))
+                          if i == idx
+                            && now.duration_since(t).as_millis() < 400
+                      );
+                      if double {
+                        if let Some(p) = self.state.procs.get_mut(idx) {
+                          p.expanded = !p.expanded;
+                          if !p.expanded {
+                            p.focused_child = None;
+                          }
+                        }
+                        self.last_proc_click = None;
+                      } else {
+                        self.last_proc_click = Some((now, idx));
+                      }
                     }
                     ClickTarget::Child {
                       proc_idx,
                       child_idx,
                     } => {
+                      self.last_proc_click = None;
                       self.state.select_proc(proc_idx);
                       if let Some(p) = self.state.procs.get_mut(proc_idx) {
                         p.focused_child = Some(child_idx);
@@ -1420,6 +1440,7 @@ pub async fn server_main(
 
     screen_size: size,
     clients: Vec::new(),
+    last_proc_click: None,
   };
 
   if let Some(hook) = &app.config.on_init {
