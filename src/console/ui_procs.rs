@@ -301,7 +301,10 @@ fn status_pill_for_proc<'a>(
     );
   }
   if matches!(proc.status, TaskStatus::Completed) {
-    return (Cow::from(" DONE "), base.set_bold(true).fg(Color::BRIGHT_GREEN));
+    return (
+      Cow::from(" FINISHED "),
+      base.set_bold(true).fg(Color::BRIGHT_GREEN),
+    );
   }
   if proc.is_up() {
     return (Cow::from(" UP "), base.set_bold(true).fg(Color::BRIGHT_GREEN));
@@ -314,6 +317,9 @@ fn status_pill_for_proc<'a>(
     ),
     None if waiting => {
       (Cow::from(" WAITING "), base.fg(Color::BRIGHT_YELLOW))
+    }
+    None if proc.oneshot => {
+      (Cow::from(" NOT RUN "), base.fg(Color::BRIGHT_BLACK))
     }
     None => (Cow::from(" DOWN "), base.fg(Color::BRIGHT_BLACK)),
   }

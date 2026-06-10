@@ -214,7 +214,7 @@ fn dep_row_visuals(
     TaskStatus::Completed => (
       "✓",
       Color::BRIGHT_GREEN,
-      Cow::Borrowed("DONE"),
+      Cow::Borrowed("FINISHED"),
       Color::BRIGHT_GREEN,
     ),
     TaskStatus::NotStarted => (

@@ -276,6 +276,16 @@ impl App {
       .unwrap_or_default()
   }
 
+  fn oneshot_for_name(&self, name: &str) -> bool {
+    self
+      .config
+      .procs
+      .iter()
+      .find(|p| p.path == name)
+      .map(|cfg| cfg.oneshot())
+      .unwrap_or(false)
+  }
+
   fn make_proc_view(
     &self,
     id: TaskId,
@@ -285,7 +295,9 @@ impl App {
     path: Option<TaskPath>,
   ) -> ProcView {
     let deps = self.deps_for_name(&name);
-    let mut pv = ProcView::new(id, name, status, vt, path, deps.clone());
+    let oneshot = self.oneshot_for_name(&name);
+    let mut pv =
+      ProcView::new(id, name, status, vt, path, deps.clone(), oneshot);
     if !deps.is_empty() {
       pv.children.push(ChildRow::new(
         None,

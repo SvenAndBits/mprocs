@@ -12,6 +12,7 @@ pub struct ProcView {
   pub deps: Vec<String>,
 
   pub status: TaskStatus,
+  pub oneshot: bool,
   pub vt: SharedVt,
   pub present: Option<SharedVt>,
 
@@ -30,6 +31,7 @@ impl ProcView {
     vt: SharedVt,
     path: Option<TaskPath>,
     deps: Vec<String>,
+    oneshot: bool,
   ) -> Self {
     Self {
       id,
@@ -37,6 +39,7 @@ impl ProcView {
       path,
       deps,
       status,
+      oneshot,
       vt,
       present: None,
       changed: false,
