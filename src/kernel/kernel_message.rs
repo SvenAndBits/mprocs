@@ -47,6 +47,7 @@ pub enum KernelCommand {
 
   // Task reporting
   TaskStarted,
+  TaskStatusChanged(TaskStatus),
   TaskStopped(u32),
 }
 
@@ -57,6 +58,7 @@ pub enum KernelQuery {
   ResolvePath(TaskPath),
   /// Get the current screen content for a task (rendered as ANSI text).
   GetScreen(TaskPath),
+  GetTask(TaskPath),
 }
 
 pub enum KernelQueryResponse {
@@ -64,6 +66,15 @@ pub enum KernelQueryResponse {
   ResolvedPath(Option<TaskId>),
   /// ANSI-rendered screen content, or None if the task has no screen.
   Screen(Option<String>),
+  TaskDetail(Option<TaskDetail>),
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskDetail {
+  pub path: Option<TaskPath>,
+  pub status: TaskStatus,
+  pub deps: Vec<(Option<TaskPath>, TaskStatus)>,
+  pub children: Vec<(Option<TaskPath>, TaskStatus)>,
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +143,15 @@ impl TaskContext {
 
   pub fn send_self_custom<T: Any + Send + 'static>(&self, custom: T) {
     self.send(KernelCommand::TaskCmd(self.task_id, TaskCmd::msg(custom)));
+  }
+
+  pub fn send_for_task(&self, from: TaskId, command: KernelCommand) {
+    if self.sender.send(KernelMessage { from, command }).is_err() {
+      log::debug!(
+        "Failed to send kernel message for task {}. Channel is closed.",
+        from.0,
+      );
+    }
   }
 
   pub fn alloc_id(&self) -> TaskId {

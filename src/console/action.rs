@@ -28,6 +28,7 @@ pub enum Action {
   ShowCommandsMenu,
   NextProc,
   PrevProc,
+  ToggleProcChildren,
   SelectProc {
     index: usize,
   },
@@ -96,6 +97,7 @@ impl Action {
       Action::ShowCommandsMenu => "All commands".to_string(),
       Action::NextProc => "Next".to_string(),
       Action::PrevProc => "Prev".to_string(),
+      Action::ToggleProcChildren => "Expand/collapse children".to_string(),
       Action::SelectProc { index } => format!("Select process #{}", index),
       Action::StartProc => "Start".to_string(),
       Action::TermProc => "Stop".to_string(),

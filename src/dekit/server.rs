@@ -14,16 +14,20 @@ use crate::{
     task::{TaskCmd, TaskStatus},
     task_path::TaskPath,
   },
-  protocol::{ClientId, CltToSrv, DkRequest, DkResponse, DkTaskInfo, SrvToClt},
+  protocol::{
+    ClientId, CltToSrv, DkRequest, DkResponse, DkTaskDetail, DkTaskInfo,
+    SrvToClt,
+  },
   term::Size,
 };
 
 pub async fn run_server(
   working_dir: PathBuf,
+  config_name: &str,
   log_level: Option<&str>,
 ) -> anyhow::Result<()> {
   let (config, keymap, load_err) =
-    match crate::config::config::Config::load_dir(&working_dir) {
+    match crate::config::config::Config::load_dir(&working_dir, config_name) {
       Ok(config) => {
         let keymap = config.keymap.build();
         (config, keymap, None)
@@ -148,6 +152,17 @@ async fn dispatch_connection(
   }
 }
 
+fn status_str(status: TaskStatus) -> String {
+  match status {
+    TaskStatus::Running => "running".to_string(),
+    TaskStatus::Starting => "starting".to_string(),
+    TaskStatus::Unhealthy => "unhealthy".to_string(),
+    TaskStatus::Completed => "completed".to_string(),
+    TaskStatus::NotStarted => "not-started".to_string(),
+    TaskStatus::Exited(code) => format!("exited:{}", code),
+  }
+}
+
 async fn handle_rpc(
   pc: &TaskContext,
   req: DkRequest,
@@ -164,11 +179,7 @@ async fn handle_rpc(
                 .path
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| format!("<task:{}>", t.id.0)),
-              status: match t.status {
-                TaskStatus::Running => "running".to_string(),
-                TaskStatus::NotStarted => "not-started".to_string(),
-                TaskStatus::Exited(code) => format!("exited:{}", code),
-              },
+              status: status_str(t.status),
             })
             .collect();
           DkResponse::TaskList(items)
@@ -207,6 +218,29 @@ async fn handle_rpc(
       let query = KernelQuery::GetScreen(path);
       match pc.query(query).await? {
         KernelQueryResponse::Screen(content) => DkResponse::Screen(content),
+        _ => DkResponse::Error("unexpected query response".to_string()),
+      }
+    }
+
+    DkRequest::Inspect { path } => {
+      let path = TaskPath::new(&path)?;
+      match pc.query(KernelQuery::GetTask(path)).await? {
+        KernelQueryResponse::TaskDetail(Some(detail)) => {
+          let to_info = |(p, s): (Option<TaskPath>, TaskStatus)| DkTaskInfo {
+            path: p.map(|p| p.to_string()).unwrap_or_default(),
+            status: status_str(s),
+          };
+          DkResponse::TaskDetail(Some(DkTaskDetail {
+            path: detail
+              .path
+              .map(|p| p.to_string())
+              .unwrap_or_default(),
+            status: status_str(detail.status),
+            deps: detail.deps.into_iter().map(to_info).collect(),
+            children: detail.children.into_iter().map(to_info).collect(),
+          }))
+        }
+        KernelQueryResponse::TaskDetail(None) => DkResponse::TaskDetail(None),
         _ => DkResponse::Error("unexpected query response".to_string()),
       }
     }

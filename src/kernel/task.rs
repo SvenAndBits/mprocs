@@ -18,6 +18,7 @@ pub trait Task: Send + 'static {
 
 pub enum TaskEffect {
   Started,
+  StatusChanged(TaskStatus),
   Stopped(u32),
   Remove,
 }
@@ -31,6 +32,10 @@ impl Effects {
 
   pub fn started(&mut self) {
     self.0.push(TaskEffect::Started);
+  }
+
+  pub fn status_changed(&mut self, status: TaskStatus) {
+    self.0.push(TaskEffect::StatusChanged(status));
   }
 
   pub fn stopped(&mut self, code: u32) {
@@ -85,6 +90,7 @@ pub enum TaskNotify {
     vt: Option<SharedVt>,
   },
   Started,
+  StatusChanged(TaskStatus),
   Stopped(u32),
   Removed,
   PathChanged(Option<TaskPath>, Option<TaskPath>),
@@ -103,6 +109,9 @@ impl fmt::Debug for TaskNotify {
         write!(f, "Added({:?}, {:?}, {:?})", path, label, status)
       }
       TaskNotify::Started => write!(f, "Started"),
+      TaskNotify::StatusChanged(status) => {
+        write!(f, "StatusChanged({:?})", status)
+      }
       TaskNotify::Stopped(code) => write!(f, "Stopped({})", code),
       TaskNotify::Removed => write!(f, "Removed"),
       TaskNotify::PathChanged(old, new) => {
@@ -131,6 +140,12 @@ impl Task for ChannelTask {
   }
 }
 
+pub struct NoopTask;
+
+impl Task for NoopTask {
+  fn handle_cmd(&mut self, _cmd: TaskCmd, _fx: &mut Effects) {}
+}
+
 pub struct TaskHandle {
   #[allow(dead_code)]
   pub task_id: TaskId,
@@ -141,6 +156,7 @@ pub struct TaskHandle {
   pub pending_start: bool,
 
   pub autorestart: bool,
+  pub oneshot: bool,
   /// Desired run state, used to decide whether an exit triggers a restart.
   pub target: Target,
   pub last_start: Option<Instant>,
@@ -162,7 +178,10 @@ pub enum Target {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TaskStatus {
   NotStarted,
+  Starting,
   Running,
+  Unhealthy,
+  Completed,
   Exited(u32),
 }
 
@@ -175,6 +194,7 @@ pub struct TaskDef {
   pub status: TaskStatus,
   pub autostart: bool,
   pub autorestart: bool,
+  pub oneshot: bool,
   pub deps: Vec<TaskId>,
   pub path: Option<TaskPath>,
   pub label: Option<String>,
@@ -188,6 +208,7 @@ impl Default for TaskDef {
       status: TaskStatus::NotStarted,
       autostart: false,
       autorestart: false,
+      oneshot: false,
       deps: Vec::new(),
       path: None,
       label: None,

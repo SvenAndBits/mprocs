@@ -7,31 +7,31 @@ use rustix::{
 };
 use tokio::signal::unix::SignalKind;
 
+type Listener = Box<dyn Fn(WaitStatus) + Send + Sync>;
+
 pub struct UnixProcessesWaiter {
   thread: tokio::task::JoinHandle<anyhow::Result<()>>,
 
-  listeners: HashMap<Pid, Box<dyn Fn(WaitStatus) + Send + Sync>>,
-  unclaimed: HashMap<Pid, WaitStatus>,
+  listeners: HashMap<Pid, Listener>,
 }
 
 static GLOBAL: Mutex<Option<UnixProcessesWaiter>> = Mutex::new(None);
 
 impl UnixProcessesWaiter {
-  pub fn wait_for(pid: Pid, f: Box<dyn Fn(WaitStatus) + Send + Sync>) {
-    match GLOBAL.lock() {
-      Ok(mut guard) => {
-        if let Some(pw) = guard.as_mut() {
-          match pw.unclaimed.remove(&pid) {
-            Some(wait_status) => {
-              f(wait_status);
-            }
-            None => {
-              pw.listeners.insert(pid, f);
-            }
-          }
+  pub fn wait_for(pid: Pid, f: Listener) {
+    let mut already_exited = None;
+    if let Ok(mut guard) = GLOBAL.lock()
+      && let Some(pw) = guard.as_mut()
+    {
+      match rustix::process::waitpid(Some(pid), WaitOptions::NOHANG) {
+        Ok(Some((_, status))) => already_exited = Some((f, status)),
+        _ => {
+          pw.listeners.insert(pid, f);
         }
       }
-      Err(_) => (),
+    }
+    if let Some((f, status)) = already_exited {
+      f(status);
     }
   }
 
@@ -45,37 +45,35 @@ impl UnixProcessesWaiter {
     let thread: tokio::task::JoinHandle<anyhow::Result<()>> =
       tokio::spawn(async move {
         while let Some(()) = signals.recv().await {
-          loop {
-            match rustix::process::wait(WaitOptions::NOHANG) {
-              Ok(Some((pid, wait_status))) => match GLOBAL.lock() {
-                Ok(mut guard) => {
-                  let pw = guard.as_mut().unwrap();
-                  match pw.listeners.remove(&pid) {
-                    Some(listener) => {
-                      listener(wait_status);
-                    }
-                    None => {
-                      pw.unclaimed.insert(pid, wait_status);
-                    }
+          let mut fired: Vec<(Listener, WaitStatus)> = Vec::new();
+          if let Ok(mut guard) = GLOBAL.lock()
+            && let Some(pw) = guard.as_mut()
+          {
+            let pids: Vec<Pid> = pw.listeners.keys().copied().collect();
+            for pid in pids {
+              match rustix::process::waitpid(Some(pid), WaitOptions::NOHANG) {
+                Ok(Some((_, wait_status))) => {
+                  if let Some(listener) = pw.listeners.remove(&pid) {
+                    fired.push((listener, wait_status));
                   }
                 }
+                Ok(None) => (),
                 Err(e) => {
-                  log::error!("SIGCHLD signal init error: {}", e);
+                  if e.raw_os_error() != libc::ECHILD {
+                    log::error!(
+                      "ProcessesWaiter waitpid({:?}) error: {} ({})",
+                      pid,
+                      e.kind(),
+                      e.raw_os_error()
+                    );
+                  }
+                  pw.listeners.remove(&pid);
                 }
-              },
-              Ok(None) => break,
-              Err(e) => {
-                // ECHILD - No spawned processes.
-                if e.raw_os_error() != libc::ECHILD {
-                  log::error!(
-                    "ProcessesWaiter wait() error: {} ({})",
-                    e.kind(),
-                    e.raw_os_error()
-                  );
-                }
-                break;
               }
             }
+          }
+          for (listener, wait_status) in fired {
+            listener(wait_status);
           }
         }
         Ok(())
@@ -84,7 +82,6 @@ impl UnixProcessesWaiter {
       thread,
 
       listeners: Default::default(),
-      unclaimed: Default::default(),
     });
 
     Ok(())

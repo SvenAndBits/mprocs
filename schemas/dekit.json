@@ -1,0 +1,385 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/SvenAndBits/mprocs/feat/health-checks-hooks-deps/schemas/dekit.json",
+  "title": "dekit Configuration Schema",
+  "description": "Schema for dekit.yaml configuration (health checks, lifecycle hooks, process dependencies, one-shot processes).",
+  "type": "object",
+  "properties": {
+    "procs": {
+      "type": "object",
+      "description": "Processes to run, keyed by name. Only allowed in the workspace config.",
+      "additionalProperties": { "$ref": "#/definitions/procConfig" }
+    },
+    "proc_defaults": {
+      "$ref": "#/definitions/procSettings",
+      "description": "Default settings merged under every proc."
+    },
+    "healthchecks": {
+      "type": "object",
+      "description": "Reusable named health checks, referenced from a proc's `healthchecks` list by name.",
+      "additionalProperties": { "$ref": "#/definitions/healthCheckDef" }
+    },
+    "hooks": {
+      "type": "object",
+      "description": "Reusable named lifecycle hooks, referenced from a proc's `hooks` block by name.",
+      "additionalProperties": { "$ref": "#/definitions/hookDef" }
+    },
+    "log": {
+      "type": "object",
+      "description": "Diagnostic logging for dekit itself.",
+      "properties": {
+        "level": {
+          "type": "string",
+          "description": "Log level (off|error|warn|info|debug|trace, or an env_logger spec)."
+        },
+        "file": { "type": "string", "description": "Log file path." }
+      },
+      "additionalProperties": false
+    },
+    "tui": {
+      "type": "object",
+      "description": "TUI appearance.",
+      "properties": {
+        "procs": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string", "description": "Title shown above the process list." },
+            "width": { "type": "integer", "description": "Process-list pane width." }
+          },
+          "additionalProperties": false
+        },
+        "tips": {
+          "type": "object",
+          "properties": {
+            "show": { "type": "boolean", "description": "Show the key-hints pane." }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "keymap": {
+      "type": "object",
+      "description": "Key bindings per scope.",
+      "properties": {
+        "procs": { "$ref": "#/definitions/keymap" },
+        "term": { "$ref": "#/definitions/keymap" },
+        "term_copy": { "$ref": "#/definitions/keymap" }
+      },
+      "additionalProperties": false
+    },
+    "on_init": {
+      "$ref": "#/definitions/action",
+      "description": "Action to run when dekit starts."
+    },
+    "on_all_finished": {
+      "$ref": "#/definitions/action",
+      "description": "Action to run when all processes have finished."
+    },
+    "on_client_exit": {
+      "enum": ["detach", "stop_all"],
+      "description": "What happens when the last TUI client disconnects. 'detach' (default) leaves the daemon and procs running; 'stop_all' stops all procs and shuts the daemon down."
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "procSettings": {
+      "type": "object",
+      "description": "Settings shared by procs and proc_defaults.",
+      "properties": {
+        "cwd": {
+          "type": "string",
+          "description": "Working directory. The <CONFIG_DIR> prefix is replaced with the config's directory."
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment overrides. A null value unsets an inherited variable. %VAR% tokens are substituted from `vars`.",
+          "additionalProperties": {
+            "oneOf": [{ "type": "string" }, { "type": "null" }]
+          }
+        },
+        "add_path": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Entries to prepend onto PATH."
+        },
+        "autostart": {
+          "type": "boolean",
+          "description": "Start automatically. Default: false."
+        },
+        "autorestart": {
+          "type": "boolean",
+          "description": "Restart on non-zero exit (after staying up >1s). Default: false."
+        },
+        "oneshot": {
+          "type": "boolean",
+          "description": "Run-once process: stays 'starting' while running, becomes 'completed' on exit 0 (releasing dependents) or 'exited' on failure (blocking dependents). Mutually exclusive with `healthchecks`."
+        },
+        "stop": { "$ref": "#/definitions/stopSignal" },
+        "log": { "$ref": "#/definitions/logConfig" },
+        "scrollback_len": {
+          "type": "integer",
+          "description": "Scrollback buffer size in lines. Default: 1000."
+        },
+        "mouse_scroll_speed": {
+          "type": "integer",
+          "description": "Lines scrolled per mouse-wheel notch."
+        },
+        "vars": {
+          "type": "object",
+          "description": "Per-proc variables. Referenced as %NAME% in cmd/shell/env/cwd and in health-check / hook commands.",
+          "additionalProperties": {
+            "type": ["string", "number", "boolean"]
+          }
+        }
+      }
+    },
+    "procConfig": {
+      "allOf": [{ "$ref": "#/definitions/procSettings" }],
+      "type": "object",
+      "title": "Process Configuration",
+      "properties": {
+        "shell": {
+          "type": "string",
+          "description": "Shell command to run (exactly one of shell or cmd)."
+        },
+        "cmd": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Command argv to run (exactly one of shell or cmd)."
+        },
+        "deps": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of procs that must be Running (or Completed, for one-shots) before this one starts."
+        },
+        "healthchecks": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/healthCheckRef" },
+          "description": "Health checks gating this proc's transition to Running. Each item is a registry name or an inline definition."
+        },
+        "hooks": { "$ref": "#/definitions/hookSet" },
+        "cwd": true,
+        "env": true,
+        "add_path": true,
+        "autostart": true,
+        "autorestart": true,
+        "oneshot": true,
+        "stop": true,
+        "log": true,
+        "scrollback_len": true,
+        "mouse_scroll_speed": true,
+        "vars": true
+      },
+      "oneOf": [{ "required": ["shell"] }, { "required": ["cmd"] }],
+      "additionalProperties": false
+    },
+    "healthCheckRef": {
+      "description": "A health-check registry name (string) or an inline definition.",
+      "oneOf": [
+        { "type": "string" },
+        { "$ref": "#/definitions/healthCheckDef" }
+      ]
+    },
+    "healthCheckDef": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string",
+          "description": "Shell command; exit 0 = pass. Required."
+        },
+        "interval": {
+          "$ref": "#/definitions/duration",
+          "description": "Time between checks. Default: 10s."
+        },
+        "timeout": {
+          "$ref": "#/definitions/duration",
+          "description": "Per-check timeout. Default: 5s."
+        },
+        "start_period": {
+          "$ref": "#/definitions/duration",
+          "description": "Grace period after spawn during which failures don't count. Default: 0s."
+        },
+        "retries": {
+          "type": "integer",
+          "description": "Consecutive failures (after start_period) before unhealthy. Default: 3."
+        },
+        "min_passes": {
+          "type": "integer",
+          "description": "Consecutive passes required before the check flips to passing. Default: 1."
+        }
+      },
+      "required": ["cmd"],
+      "additionalProperties": false
+    },
+    "hookSet": {
+      "type": "object",
+      "description": "Lifecycle hooks. Each event maps to a hook registry name (string) or an inline definition.",
+      "properties": {
+        "started": { "$ref": "#/definitions/hookRef" },
+        "running": { "$ref": "#/definitions/hookRef" },
+        "unhealthy": { "$ref": "#/definitions/hookRef" },
+        "stopped": { "$ref": "#/definitions/hookRef" },
+        "failed": { "$ref": "#/definitions/hookRef" }
+      },
+      "additionalProperties": false
+    },
+    "hookRef": {
+      "description": "A hook registry name (string) or an inline definition.",
+      "oneOf": [{ "type": "string" }, { "$ref": "#/definitions/hookDef" }]
+    },
+    "hookDef": {
+      "type": "object",
+      "properties": {
+        "cmd": { "type": "string", "description": "Shell command to run. Required." },
+        "async": {
+          "type": "boolean",
+          "description": "Run detached without blocking the lifecycle transition. Default: false."
+        }
+      },
+      "required": ["cmd"],
+      "additionalProperties": false
+    },
+    "duration": {
+      "description": "A duration like \"10s\", \"500ms\", \"2m\", \"1h\". A bare number is seconds.",
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?\\s*(ms|s|sec|secs|m|min|mins|h|hr|hrs)?$" },
+        { "type": "integer" }
+      ]
+    },
+    "stopSignal": {
+      "description": "How to stop the process.",
+      "oneOf": [
+        { "enum": ["SIGINT", "SIGTERM", "SIGKILL", "hard-kill"] },
+        {
+          "type": "object",
+          "properties": {
+            "send-keys": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["send-keys"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "cmd": {
+              "type": "string",
+              "description": "Shell command to run to stop the process (e.g. `docker compose down`)."
+            }
+          },
+          "required": ["cmd"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "logConfig": {
+      "description": "Per-process logging. true enables defaults; false/null disables; a string is shorthand for { dir: ... }; an object is the full form.",
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "string" },
+        {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "dir": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+            "file": {
+              "oneOf": [{ "type": "string" }, { "type": "null" }],
+              "description": "Supports {name}, {id}, {pid}, {ts} placeholders."
+            },
+            "mode": { "enum": ["append", "truncate"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "action": {
+      "description": "A dekit command/event, discriminated by the `c` tag (e.g. {c: quit}).",
+      "type": "object",
+      "required": ["c"],
+      "oneOf": [
+        {
+          "title": "Batch",
+          "properties": {
+            "c": { "const": "batch" },
+            "cmds": { "type": "array", "items": { "$ref": "#/definitions/action" } }
+          },
+          "required": ["c", "cmds"],
+          "additionalProperties": false
+        },
+        {
+          "title": "Select process by index",
+          "properties": {
+            "c": { "const": "select-proc" },
+            "index": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["c", "index"],
+          "additionalProperties": false
+        },
+        {
+          "title": "Send a key to the focused terminal",
+          "properties": {
+            "c": { "const": "send-key" },
+            "key": { "type": "string", "pattern": "^<[^>]+>$" }
+          },
+          "required": ["c", "key"],
+          "additionalProperties": false
+        },
+        {
+          "title": "Simple command (no payload)",
+          "properties": {
+            "c": {
+              "enum": [
+                "quit-or-ask",
+                "quit",
+                "force-quit",
+                "toggle-focus",
+                "focus-procs",
+                "focus-term",
+                "zoom",
+                "show-commands-menu",
+                "next-proc",
+                "prev-proc",
+                "toggle-proc-children",
+                "start-proc",
+                "term-proc",
+                "kill-proc",
+                "restart-proc",
+                "restart-all",
+                "force-restart-proc",
+                "force-restart-all",
+                "show-add-proc",
+                "show-rename-proc",
+                "duplicate-proc",
+                "show-remove-proc",
+                "close-current-modal",
+                "scroll-down",
+                "scroll-up",
+                "copy-mode-enter",
+                "copy-mode-leave",
+                "copy-mode-end",
+                "copy-mode-copy",
+                "toggle-keymap-window"
+              ]
+            }
+          },
+          "required": ["c"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "keymap": {
+      "type": "object",
+      "description": "Key bindings. `reset` clears inherited binds; keys shaped like <...> map to an action (or null to unbind).",
+      "properties": {
+        "reset": { "type": "boolean" }
+      },
+      "patternProperties": {
+        "^<[^>]+>$": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/action" }]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,14 +1,17 @@
 use std::path::Path;
 
-pub fn spawn_server_daemon(working_dir: &Path) -> anyhow::Result<()> {
+pub fn spawn_server_daemon(
+  working_dir: &Path,
+  config_name: &str,
+) -> anyhow::Result<()> {
   let exe = std::env::current_exe()?;
   let canonical_dir = dunce::canonicalize(working_dir)?;
   let dir_str = canonical_dir.to_string_lossy().into_owned();
 
   #[cfg(unix)]
-  return self::unix::spawn_impl(exe, &dir_str);
+  return self::unix::spawn_impl(exe, &dir_str, config_name);
   #[cfg(windows)]
-  return self::windows::spawn_impl(exe, &dir_str);
+  return self::windows::spawn_impl(exe, &dir_str, config_name);
 }
 
 #[cfg(unix)]
@@ -17,7 +20,11 @@ mod unix {
 
   use anyhow::bail;
 
-  pub fn spawn_impl(exe: PathBuf, dir: &str) -> anyhow::Result<()> {
+  pub fn spawn_impl(
+    exe: PathBuf,
+    dir: &str,
+    config_name: &str,
+  ) -> anyhow::Result<()> {
     let daemon =
       daemonize::Daemonize::new().working_directory(std::env::current_dir()?);
 
@@ -31,6 +38,8 @@ mod unix {
         "run",
         "--dir",
         dir,
+        "--config",
+        config_name,
       ])?,
     }
 
@@ -77,11 +86,15 @@ mod windows {
     CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS,
   };
 
-  pub fn spawn_impl(path: PathBuf, dir: &str) -> anyhow::Result<()> {
+  pub fn spawn_impl(
+    path: PathBuf,
+    dir: &str,
+    config_name: &str,
+  ) -> anyhow::Result<()> {
     use std::{os::windows::process::CommandExt, process::Stdio};
 
     std::process::Command::new(path)
-      .args(["server", "run", "--dir", dir])
+      .args(["server", "run", "--dir", dir, "--config", config_name])
       .stdin(Stdio::null())
       .stdout(Stdio::null())
       .stderr(Stdio::null())
