@@ -19,7 +19,8 @@ pub fn render_procs(
   state: &mut State,
   config: &Config,
 ) {
-  state.procs_list.fit(area.inner(1), state.procs.len());
+  let list_fit_area = area.inner((2, 1, 1, 1));
+  state.procs_list.fit(list_fit_area, state.procs.len());
 
   if area.width <= 2 {
     return;
@@ -65,7 +66,15 @@ pub fn render_procs(
   }
 
   let inner = area.inner(1);
-  let mut y_cursor = inner.y;
+  let dash_row = Rect {
+    x: area.x + 1,
+    y: inner.y,
+    width: area.width.saturating_sub(2),
+    height: 1,
+  };
+  render_dashboard_row(grid, dash_row, state.dashboard_selected);
+
+  let mut y_cursor = inner.y + 1;
   let y_max = inner.y + inner.height;
   let range = state.procs_list.visible_range();
   for proc_idx in range {
@@ -76,8 +85,9 @@ pub fn render_procs(
       Some(p) => p,
       None => continue,
     };
-    let proc_selected =
-      proc_idx == state.selected() && proc.focused_child.is_none();
+    let proc_selected = !state.dashboard_selected
+      && proc_idx == state.selected()
+      && proc.focused_child.is_none();
     let row_area = Rect {
       x: area.x + 1,
       y: y_cursor,
@@ -154,6 +164,19 @@ fn proc_is_waiting_for_deps(proc: &ProcView, all_procs: &[ProcView]) -> bool {
     }
   }
   false
+}
+
+fn render_dashboard_row(grid: &mut Grid, area: Rect, selected: bool) {
+  let attrs = if selected {
+    Attrs::default().bg(Color::Idx(240)).set_bold(true)
+  } else {
+    Attrs::default()
+  };
+  let r = grid.draw_text(area, if selected { "•" } else { " " }, attrs);
+  let mut row_area = area;
+  row_area.x += r.width;
+  row_area.width = row_area.width.saturating_sub(r.width);
+  grid.draw_line(row_area, "▦ Dashboard", attrs.clone().fg(Color::BRIGHT_CYAN));
 }
 
 fn render_proc_row(
@@ -356,6 +379,7 @@ fn status_pill_for_child<'a>(
 
 #[derive(Clone, Copy, Debug)]
 pub enum ClickTarget {
+  Dashboard,
   Proc(usize),
   Child { proc_idx: usize, child_idx: usize },
 }
@@ -370,11 +394,16 @@ pub fn procs_get_clicked_index(
     return None;
   }
   let inner = area.inner(1);
-  let scroll = (state.selected() + 1).saturating_sub(inner.height as usize);
   let target_offset = y.saturating_sub(inner.y) as usize;
+  if target_offset == 0 {
+    return Some(ClickTarget::Dashboard);
+  }
+  let list_offset = target_offset - 1;
+  let list_height = (inner.height as usize).saturating_sub(1);
+  let scroll = (state.selected() + 1).saturating_sub(list_height);
   let mut cursor = 0usize;
   for (proc_idx, proc) in state.procs.iter().enumerate().skip(scroll) {
-    if cursor == target_offset {
+    if cursor == list_offset {
       return Some(ClickTarget::Proc(proc_idx));
     }
     cursor += 1;
@@ -382,7 +411,7 @@ pub fn procs_get_clicked_index(
       continue;
     }
     for child_idx in 0..proc.children.len() {
-      if cursor == target_offset {
+      if cursor == list_offset {
         return Some(ClickTarget::Child {
           proc_idx,
           child_idx,

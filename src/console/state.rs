@@ -11,6 +11,13 @@ pub enum Scope {
   TermZoom,
 }
 
+#[derive(Default)]
+pub struct DashboardState {
+  pub focused_node: Option<usize>,
+  pub scroll_col: i32,
+  pub scroll_row: i32,
+}
+
 impl Scope {
   pub fn toggle(&self) -> Self {
     match self {
@@ -37,6 +44,9 @@ pub struct State {
   pub procs_list: ListState,
   pub hide_keymap_window: bool,
 
+  pub dashboard_selected: bool,
+  pub dashboard: DashboardState,
+
   pub quitting: bool,
 }
 
@@ -46,6 +56,9 @@ impl State {
   }
 
   pub fn get_current_proc(&self) -> Option<&ProcView> {
+    if self.dashboard_selected {
+      return None;
+    }
     self.procs.get(self.procs_list.selected())
   }
 

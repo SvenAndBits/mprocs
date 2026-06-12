@@ -13,6 +13,8 @@ use crate::{
     action::{Action, CopyMove},
     app_client::ClientHandle,
     app_layout::AppLayout,
+    dashboard::layout::{GraphLayout, layout_graph},
+    dashboard::render::node_at as dashboard_node_at,
     keymap::Keymap,
     modal::{
       add_proc::AddProcModal, commands_menu::CommandsMenuModal, modal::Modal,
@@ -23,7 +25,7 @@ use crate::{
       ChildKind, ChildRow, child_kind_from_path, is_child_path, proc_path_of,
     },
     proc::view::ProcView,
-    state::{Scope, State},
+    state::{DashboardState, Scope, State},
     ui_keymap::render_keymap,
     ui_procs::{
       ClickTarget, procs_check_hit, procs_get_clicked_index, render_procs,
@@ -63,7 +65,7 @@ use crate::{
     Grid, Size, TermEvent, Winsize,
     attrs::Attrs,
     grid::Rect,
-    key::{Key, KeyEventKind},
+    key::{Key, KeyCode, KeyEventKind, KeyMods},
     mouse::{MouseButton, MouseEventKind},
   },
 };
@@ -151,6 +153,7 @@ impl App {
       .pc
       .subscribe_path(TaskPath::new("/").unwrap(), SubMode::Subtree);
     self.refresh_procs().await;
+    self.dashboard_ensure_focus();
 
     self.start_procs()?;
 
@@ -360,6 +363,16 @@ impl App {
   }
 
   fn focus_next_row(&mut self) {
+    if self.state.dashboard_selected {
+      if !self.state.procs.is_empty() {
+        self.state.dashboard_selected = false;
+        if let Some(p) = self.state.procs.get_mut(0) {
+          p.focused_child = None;
+        }
+        self.state.select_proc(0);
+      }
+      return;
+    }
     let sel = self.state.selected();
     let Some(proc) = self.state.procs.get(sel) else {
       return;
@@ -380,9 +393,11 @@ impl App {
     if let Some(p) = self.state.procs.get_mut(sel) {
       p.focused_child = None;
     }
-    let mut next = sel + 1;
+    let next = sel + 1;
     if next >= self.state.procs.len() {
-      next = 0;
+      self.state.dashboard_selected = true;
+      self.dashboard_ensure_focus();
+      return;
     }
     if let Some(p) = self.state.procs.get_mut(next) {
       p.focused_child = None;
@@ -391,6 +406,17 @@ impl App {
   }
 
   fn focus_prev_row(&mut self) {
+    if self.state.dashboard_selected {
+      if !self.state.procs.is_empty() {
+        self.state.dashboard_selected = false;
+        let last = self.state.procs.len() - 1;
+        if let Some(p) = self.state.procs.get_mut(last) {
+          p.focused_child = None;
+        }
+        self.state.select_proc(last);
+      }
+      return;
+    }
     let sel = self.state.selected();
     let Some(proc) = self.state.procs.get(sel) else {
       return;
@@ -410,11 +436,12 @@ impl App {
       }
       None => {}
     }
-    let prev = if sel > 0 {
-      sel - 1
-    } else {
-      self.state.procs.len().saturating_sub(1)
-    };
+    if sel == 0 {
+      self.state.dashboard_selected = true;
+      self.dashboard_ensure_focus();
+      return;
+    }
+    let prev = sel - 1;
     let land_child = self
       .state
       .procs
@@ -425,6 +452,138 @@ impl App {
       p.focused_child = land_child;
     }
     self.state.select_proc(prev);
+  }
+
+  fn dashboard_ensure_focus(&mut self) {
+    let n = self.state.procs.len();
+    if n == 0 {
+      self.state.dashboard.focused_node = None;
+      return;
+    }
+    let valid = matches!(self.state.dashboard.focused_node, Some(i) if i < n);
+    if !valid {
+      let default = self.state.selected().min(n - 1);
+      self.state.dashboard.focused_node = Some(default);
+    }
+  }
+
+  fn handle_dashboard_key(
+    &mut self,
+    loop_action: &mut LoopAction,
+    key: &Key,
+  ) -> bool {
+    if key.mods != KeyMods::NONE {
+      return false;
+    }
+    let dir = match key.code {
+      KeyCode::Left | KeyCode::Char('h') => Some(CopyMove::Left),
+      KeyCode::Right | KeyCode::Char('l') => Some(CopyMove::Right),
+      KeyCode::Up | KeyCode::Char('k') => Some(CopyMove::Up),
+      KeyCode::Down | KeyCode::Char('j') => Some(CopyMove::Down),
+      _ => None,
+    };
+    if let Some(dir) = dir {
+      self.dashboard_move(dir);
+      loop_action.render();
+      return true;
+    }
+    match key.code {
+      KeyCode::Char(' ') | KeyCode::Enter => {
+        self.dashboard_select_focused();
+        loop_action.render();
+        true
+      }
+      _ => false,
+    }
+  }
+
+  fn dashboard_move(&mut self, dir: CopyMove) {
+    self.dashboard_ensure_focus();
+    let Some(cur) = self.state.dashboard.focused_node else {
+      return;
+    };
+    let graph = layout_graph(&self.state.procs);
+    let Some(from) = graph.node_for_proc(cur) else {
+      return;
+    };
+    let fx = from.center_col();
+    let fy = from.center_row();
+    let mut best: Option<(usize, i64)> = None;
+    for node in &graph.nodes {
+      if node.proc_idx == cur {
+        continue;
+      }
+      let dx = node.center_col() - fx;
+      let dy = node.center_row() - fy;
+      let in_dir = match dir {
+        CopyMove::Left => dx < 0,
+        CopyMove::Right => dx > 0,
+        CopyMove::Up => dy < 0,
+        CopyMove::Down => dy > 0,
+      };
+      if !in_dir {
+        continue;
+      }
+      let (primary, perp) = match dir {
+        CopyMove::Left | CopyMove::Right => {
+          (dx.abs() as i64, dy.abs() as i64)
+        }
+        CopyMove::Up | CopyMove::Down => (dy.abs() as i64, dx.abs() as i64),
+      };
+      let cost = primary + perp * 3;
+      if best.map_or(true, |(_, c)| cost < c) {
+        best = Some((node.proc_idx, cost));
+      }
+    }
+    if let Some((idx, _)) = best {
+      self.state.dashboard.focused_node = Some(idx);
+      self.dashboard_follow_focus(&graph);
+    }
+  }
+
+  fn dashboard_follow_focus(&mut self, graph: &GraphLayout) {
+    let Some(idx) = self.state.dashboard.focused_node else {
+      return;
+    };
+    let Some(node) = graph.node_for_proc(idx) else {
+      return;
+    };
+    let inner = self.get_layout().term.inner(1);
+    let w = inner.width as i32;
+    let h = inner.height as i32;
+    let nx = node.rect.x as i32;
+    let nw = node.rect.width as i32;
+    let ny = node.rect.y as i32;
+    let mut sc = self.state.dashboard.scroll_col;
+    let mut sr = self.state.dashboard.scroll_row;
+    if nx - sc < 0 {
+      sc = nx;
+    }
+    if nx + nw - sc > w {
+      sc = nx + nw - w;
+    }
+    if ny - sr < 0 {
+      sr = ny;
+    }
+    if ny + 1 - sr > h {
+      sr = ny + 1 - h;
+    }
+    let max_col = (graph.content_width as i32 - w).max(0);
+    let max_row = (graph.content_height as i32 - h).max(0);
+    self.state.dashboard.scroll_col = sc.clamp(0, max_col);
+    self.state.dashboard.scroll_row = sr.clamp(0, max_row);
+  }
+
+  fn dashboard_select_focused(&mut self) {
+    self.dashboard_ensure_focus();
+    if let Some(idx) = self.state.dashboard.focused_node {
+      self.state.dashboard_selected = false;
+      if let Some(p) = self.state.procs.get_mut(idx) {
+        p.focused_child = None;
+      }
+      self.state.select_proc(idx);
+      self.state.scope = Scope::Term;
+    }
   }
 
   async fn refresh_procs(&mut self) {
@@ -620,6 +779,12 @@ impl App {
         state: _,
       }) => {
         let key = Key::new(code, mods);
+        if self.state.dashboard_selected
+          && matches!(self.state.scope, Scope::Term | Scope::TermZoom)
+          && self.handle_dashboard_key(loop_action, &key)
+        {
+          return;
+        }
         let group = self.state.get_keymap_group();
         if let Some(bound) = self.keymap.resolve(group, &key) {
           let bound = bound.clone();
@@ -649,7 +814,30 @@ impl App {
           {
             self.state.scope = Scope::Term
           }
-          if let Some(proc) = self.state.get_current_proc() {
+          if self.state.dashboard_selected {
+            if let MouseEventKind::Down(MouseButton::Left) = mouse_event.kind {
+              if let Some(idx) = dashboard_node_at(
+                layout.term,
+                &self.state,
+                mouse_event.x as u16,
+                mouse_event.y as u16,
+              ) {
+                self.state.dashboard.focused_node = Some(idx);
+                let now = std::time::Instant::now();
+                let double = matches!(
+                  self.last_proc_click,
+                  Some((t, i))
+                    if i == idx && now.duration_since(t).as_millis() < 400
+                );
+                if double {
+                  self.last_proc_click = None;
+                  self.dashboard_select_focused();
+                } else {
+                  self.last_proc_click = Some((now, idx));
+                }
+              }
+            }
+          } else if let Some(proc) = self.state.get_current_proc() {
             let local_event = mouse_event.translate(layout.term_area());
             self.pc.send(KernelCommand::TaskCmd(
               proc.id,
@@ -676,7 +864,13 @@ impl App {
                   &self.state,
                 ) {
                   match target {
+                    ClickTarget::Dashboard => {
+                      self.last_proc_click = None;
+                      self.state.dashboard_selected = true;
+                      self.dashboard_ensure_focus();
+                    }
                     ClickTarget::Proc(idx) => {
+                      self.state.dashboard_selected = false;
                       if let Some(p) = self.state.procs.get_mut(idx) {
                         p.focused_child = None;
                       }
@@ -705,6 +899,7 @@ impl App {
                       child_idx,
                     } => {
                       self.last_proc_click = None;
+                      self.state.dashboard_selected = false;
                       self.state.select_proc(proc_idx);
                       if let Some(p) = self.state.procs.get_mut(proc_idx) {
                         p.focused_child = Some(child_idx);
@@ -836,10 +1031,15 @@ impl App {
         loop_action.render();
       }
       Action::SelectProc { index } => {
+        self.state.dashboard_selected = false;
         if let Some(p) = self.state.procs.get_mut(*index) {
           p.focused_child = None;
         }
         self.state.select_proc(*index);
+        loop_action.render();
+      }
+      Action::ToggleProcChildren if self.state.dashboard_selected => {
+        self.state.scope = Scope::Term;
         loop_action.render();
       }
       Action::ToggleProcChildren => {
@@ -1432,6 +1632,9 @@ pub async fn server_main(
     procs: Vec::new(),
     procs_list: ListState::default(),
     hide_keymap_window: !config.tui.tips.show,
+
+    dashboard_selected: true,
+    dashboard: DashboardState::default(),
 
     quitting: false,
   };

@@ -2,6 +2,7 @@ pub mod action;
 pub mod app;
 pub mod app_client;
 pub mod app_layout;
+pub mod dashboard;
 pub mod keymap;
 pub mod modal;
 pub mod proc;
