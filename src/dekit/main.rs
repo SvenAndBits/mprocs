@@ -41,7 +41,10 @@ fn resolve_working_dir(matches: &clap::ArgMatches) -> anyhow::Result<PathBuf> {
   }
 }
 
-async fn shutdown_daemon(working_dir: &Path) -> anyhow::Result<()> {
+async fn shutdown_daemon(
+  working_dir: &Path,
+  config_name: &str,
+) -> anyhow::Result<()> {
   match lockfile::get_daemon_status(working_dir)? {
     None => anyhow::bail!("No daemon found for this directory"),
     Some(info) if !info.is_running => {
@@ -51,7 +54,8 @@ async fn shutdown_daemon(working_dir: &Path) -> anyhow::Result<()> {
     Some(_) => {}
   }
 
-  let _ = rpc_request(working_dir, DkRequest::Shutdown, false).await;
+  let _ =
+    rpc_request(working_dir, DkRequest::Shutdown, false, config_name).await;
 
   for _ in 0..50 {
     match lockfile::get_daemon_status(working_dir)? {
@@ -347,7 +351,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
     }
     Some(("down", _sub_m)) => {
       let working_dir = resolve_working_dir(&matches)?;
-      shutdown_daemon(&working_dir).await?;
+      shutdown_daemon(&working_dir, &config).await?;
       println!("Daemon stopped.");
     }
     Some(("server", sub_m)) => match sub_m.subcommand() {
@@ -378,7 +382,7 @@ pub async fn dekit_main() -> anyhow::Result<()> {
       }
       Some(("stop", _sub_m)) => {
         let working_dir = resolve_working_dir(&matches)?;
-        shutdown_daemon(&working_dir).await?;
+        shutdown_daemon(&working_dir, &config).await?;
         println!("Daemon stopped.");
       }
       Some(("status", _sub_m)) => {
