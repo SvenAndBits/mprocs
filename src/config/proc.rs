@@ -15,6 +15,7 @@ use crate::process::process_spec::ProcessSpec;
 
 const DEFAULT_SCROLLBACK_LEN: usize = 1000;
 const DEFAULT_MOUSE_SCROLL_SPEED: usize = 5;
+const DEFAULT_RESTART_DELAY_MS: u64 = 1000;
 
 #[derive(Clone, Default)]
 pub struct ProcConfig {
@@ -27,6 +28,7 @@ pub struct ProcConfig {
   pub add_path: Option<Vec<PathBuf>>,
   pub autostart: Option<bool>,
   pub autorestart: Option<bool>,
+  pub restart_delay: Option<u64>,
   pub oneshot: Option<bool>,
   pub stop: Option<StopSignal>,
   pub log: Option<ProcLogConfig>,
@@ -57,6 +59,7 @@ impl ProcConfig {
       add_path: over.add_path.or(self.add_path),
       autostart: over.autostart.or(self.autostart),
       autorestart: over.autorestart.or(self.autorestart),
+      restart_delay: over.restart_delay.or(self.restart_delay),
       oneshot: over.oneshot.or(self.oneshot),
       stop: over.stop.or(self.stop),
       log: match (over.log, self.log) {
@@ -84,6 +87,11 @@ impl ProcConfig {
   }
   pub fn autorestart(&self) -> bool {
     self.autorestart.unwrap_or(false)
+  }
+  pub fn restart_delay(&self) -> std::time::Duration {
+    std::time::Duration::from_millis(
+      self.restart_delay.unwrap_or(DEFAULT_RESTART_DELAY_MS),
+    )
   }
   pub fn oneshot(&self) -> bool {
     self.oneshot.unwrap_or(false)
@@ -113,6 +121,7 @@ pub(crate) fn parse_proc_settings(
   p.add_path = obj.optional("add_path", cx)?;
   p.autostart = obj.optional("autostart", cx)?;
   p.autorestart = obj.optional("autorestart", cx)?;
+  p.restart_delay = obj.optional("restart_delay", cx)?;
   p.oneshot = obj.optional("oneshot", cx)?;
   p.stop = obj.optional("stop", cx)?;
   p.log = obj.optional("log", cx)?;

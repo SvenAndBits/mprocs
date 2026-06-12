@@ -153,6 +153,7 @@ settings in the _global_ config.
     environment variable.
   - **autostart**: _bool_ - Start process when mprocs starts. Default: _true_.
   - **autorestart**: _bool_ - Restart process when it exits. Default: false. Note: If process exits within 1 second of starting, it will not be restarted.
+  - **restart_delay**: _number_ - Delay in milliseconds before an autorestart is triggered after the process exits. Default: 1000.
   - **stop**: _"SIGINT"|"SIGTERM"|"SIGKILL"|{send-keys: array<key>}|{cmd: string}|"hard-kill"_ -
     A way to stop a process (using `x` key or when quitting mprocs). The `cmd`
     form runs a shell command (e.g. `podman compose down`) instead of

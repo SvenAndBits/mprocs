@@ -142,6 +142,11 @@
               "type": "boolean",
               "description": "Restart process when it exits. Default: false. Note: If process exits within 1 second of starting, it will not be restarted."
             },
+            "restart_delay": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Delay in milliseconds before an autorestart is triggered after the process exits. Default: 1000."
+            },
             "stop": {
               "description": "How to stop the process (using the `x` key or when quitting mprocs).",
               "oneOf": [

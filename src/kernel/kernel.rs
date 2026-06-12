@@ -1,7 +1,7 @@
 use std::{
   collections::{HashMap, HashSet},
   sync::{Arc, atomic::AtomicUsize},
-  time::Instant,
+  time::{Duration, Instant},
 };
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -92,6 +92,7 @@ impl Kernel {
       status: def.status,
       pending_start: false,
       autorestart: def.autorestart,
+      restart_delay: def.restart_delay,
       oneshot: def.oneshot,
       target: Target::None,
       last_start: None,
@@ -468,6 +469,7 @@ impl Kernel {
 
       TaskEffect::Stopped(exit_code) => {
         let mut restart = false;
+        let mut restart_delay = Duration::ZERO;
         let mut completed = false;
         if let Some(task) = self.tasks.get_mut(&task_id) {
           task.pending_start = false;
@@ -488,6 +490,10 @@ impl Kernel {
               exit_code,
               task.last_start,
             );
+            restart_delay = match target {
+              Target::None => task.restart_delay,
+              Target::Started | Target::Stopped => Duration::ZERO,
+            };
             match task.target {
               Target::Stopped => task.target = Target::None,
               Target::None | Target::Started => {}
@@ -521,13 +527,19 @@ impl Kernel {
         }
 
         if restart {
-          self
-            .sender
-            .send(KernelMessage {
-              from: TaskId(0),
-              command: KernelCommand::TaskCmd(task_id, TaskCmd::Start),
-            })
-            .log_ignore();
+          let sender = self.sender.clone();
+          let msg = KernelMessage {
+            from: TaskId(0),
+            command: KernelCommand::TaskCmd(task_id, TaskCmd::Start),
+          };
+          if restart_delay.is_zero() {
+            sender.send(msg).log_ignore();
+          } else {
+            tokio::spawn(async move {
+              tokio::time::sleep(restart_delay).await;
+              sender.send(msg).log_ignore();
+            });
+          }
         }
       }
 
@@ -896,6 +908,72 @@ mod tests {
   ) {
     let (tx, rx) = unbounded_channel();
     (rx, move |_| Box::new(RecordingTask { tx }))
+  }
+
+  struct CrashingTask {
+    tx: UnboundedSender<RecordedCmd>,
+  }
+
+  impl Task for CrashingTask {
+    fn handle_cmd(&mut self, cmd: TaskCmd, fx: &mut Effects) {
+      match cmd {
+        TaskCmd::Start => {
+          self.tx.send(RecordedCmd::Start).unwrap();
+          fx.started();
+        }
+        TaskCmd::Stop => fx.stopped(0),
+        TaskCmd::Kill => fx.stopped(137),
+        TaskCmd::Msg(_) => fx.stopped(1),
+      }
+    }
+  }
+
+  fn crashing_task() -> (
+    UnboundedReceiver<RecordedCmd>,
+    impl FnOnce(TaskContext) -> Box<dyn Task> + 'static,
+  ) {
+    let (tx, rx) = unbounded_channel();
+    (rx, move |_| Box::new(CrashingTask { tx }))
+  }
+
+  #[tokio::test]
+  async fn autorestart_waits_for_restart_delay() {
+    let mut kernel = Kernel::new();
+    let pc = kernel.context();
+
+    let (mut rx, factory) = crashing_task();
+    let id = kernel.register_task(
+      TaskDef {
+        autorestart: true,
+        restart_delay: Duration::from_millis(300),
+        path: Some(TaskPath::new("/1").unwrap()),
+        ..Default::default()
+      },
+      factory,
+    );
+
+    let kernel_task = tokio::spawn(kernel.run());
+
+    pc.send(KernelCommand::TaskCmd(id, TaskCmd::Start));
+    assert_eq!(recv_cmd(&mut rx).await, RecordedCmd::Start);
+
+    // Stay up past RESTART_THRESHOLD_SECONDS so the crash qualifies for
+    // autorestart, then inject a nonzero exit.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    pc.send(KernelCommand::TaskCmd(id, TaskCmd::Msg(Box::new(()))));
+    let crashed_at = Instant::now();
+    assert_eq!(recv_cmd(&mut rx).await, RecordedCmd::Start);
+    assert!(
+      crashed_at.elapsed() >= Duration::from_millis(250),
+      "restart fired before the configured delay: {:?}",
+      crashed_at.elapsed()
+    );
+
+    pc.send(KernelCommand::Quit);
+    tokio::time::timeout(Duration::from_secs(1), kernel_task)
+      .await
+      .expect("timed out waiting for kernel to quit")
+      .unwrap();
   }
 
   async fn recv_cmd(rx: &mut UnboundedReceiver<RecordedCmd>) -> RecordedCmd {

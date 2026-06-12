@@ -1265,6 +1265,7 @@ fn proc_task_config(
     log,
     autostart: cfg.autostart(),
     autorestart: cfg.autorestart(),
+    restart_delay: cfg.restart_delay(),
     oneshot: cfg.oneshot(),
     scrollback_len: cfg.scrollback_len(),
     mouse_scroll_speed: cfg.mouse_scroll_speed(),

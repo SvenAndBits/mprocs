@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
@@ -156,6 +156,8 @@ pub struct TaskHandle {
   pub pending_start: bool,
 
   pub autorestart: bool,
+  /// Delay before an automatic restart is triggered after an exit.
+  pub restart_delay: Duration,
   pub oneshot: bool,
   /// Desired run state, used to decide whether an exit triggers a restart.
   pub target: Target,
@@ -194,6 +196,7 @@ pub struct TaskDef {
   pub status: TaskStatus,
   pub autostart: bool,
   pub autorestart: bool,
+  pub restart_delay: Duration,
   pub oneshot: bool,
   pub deps: Vec<TaskId>,
   pub path: Option<TaskPath>,
@@ -208,6 +211,7 @@ impl Default for TaskDef {
       status: TaskStatus::NotStarted,
       autostart: false,
       autorestart: false,
+      restart_delay: Duration::from_millis(1000),
       oneshot: false,
       deps: Vec::new(),
       path: None,

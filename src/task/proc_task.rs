@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::future::pending;
+use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -64,6 +65,7 @@ pub struct ProcTaskConfig {
   pub log: Option<LogResolver>,
   pub autostart: bool,
   pub autorestart: bool,
+  pub restart_delay: Duration,
   pub oneshot: bool,
   pub scrollback_len: usize,
   pub mouse_scroll_speed: usize,
@@ -82,6 +84,7 @@ impl ProcTaskConfig {
       log: None,
       autostart: true,
       autorestart: false,
+      restart_delay: Duration::from_millis(1000),
       oneshot: false,
       scrollback_len: 1000,
       mouse_scroll_speed: 5,
@@ -115,6 +118,7 @@ pub fn spawn_proc_task_with_id(
     log,
     autostart,
     autorestart,
+    restart_delay,
     oneshot,
     scrollback_len,
     mouse_scroll_speed,
@@ -172,6 +176,7 @@ pub fn spawn_proc_task_with_id(
     scrollback_len,
     mouse_scroll_speed,
     autorestart,
+    restart_delay,
     oneshot,
     vars,
     healthchecks,
@@ -188,6 +193,7 @@ pub fn spawn_proc_task_with_id(
       stop_on_quit: true,
       autostart,
       autorestart,
+      restart_delay,
       oneshot,
       deps,
       path: task_path,
@@ -229,6 +235,7 @@ struct ProcRuntime {
   scrollback_len: usize,
   mouse_scroll_speed: usize,
   autorestart: bool,
+  restart_delay: Duration,
   oneshot: bool,
   vars: Vars,
   healthchecks: Vec<HealthCheckDef>,
@@ -273,6 +280,7 @@ async fn proc_main(
     scrollback_len,
     mouse_scroll_speed,
     autorestart,
+    restart_delay,
     oneshot,
     vars,
     healthchecks,
@@ -489,6 +497,7 @@ async fn proc_main(
                   log: None,
                   autostart: true,
                   autorestart,
+                  restart_delay,
                   oneshot,
                   scrollback_len,
                   mouse_scroll_speed,
