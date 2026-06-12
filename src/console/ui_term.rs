@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use crate::console::dashboard::render::render_dashboard;
 use crate::console::proc::child::ChildKind;
 use crate::console::proc::view::ProcView;
 use crate::console::state::{Scope, State};
@@ -8,6 +9,11 @@ use crate::term::{Color, Grid, Screen, attrs::Attrs, grid::Rect};
 
 pub fn render_term(area: Rect, grid: &mut Grid, state: &mut State) {
   if area.width < 3 || area.height < 3 {
+    return;
+  }
+
+  if state.dashboard_selected {
+    render_dashboard(area, grid, state);
     return;
   }
 
