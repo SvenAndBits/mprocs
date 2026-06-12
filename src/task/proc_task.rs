@@ -1,25 +1,44 @@
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::future::pending;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::config::health::{HealthCheckDef, HookEvent, HookSet, Vars};
 use crate::error::ResultLogger;
 use crate::kernel::kernel_message::{KernelCommand, SharedVt, TaskContext};
-use crate::kernel::task::{TaskCmd, TaskDef, TaskId};
+use crate::kernel::task::{NoopTask, TaskCmd, TaskDef, TaskId, TaskStatus};
 use crate::kernel::task_path::TaskPath;
 use crate::kernel::task_screen::{TaskScreen, TaskScreenCmd, TaskScreenEffect};
 use crate::process::NativeProcess;
 use crate::process::process::Process as _;
 use crate::process::process_spec::ProcessSpec;
+use crate::task::child_vt::new_child_vt;
+use crate::task::health::{HealthRunner, run_check_once_manual};
+use crate::task::hooks::{EnvOverrides, run_hook};
 use crate::task::logger::{LogResolver, spawn_logger};
 use crate::term::encode::{KeyCodeEncodeModes, encode_key};
 use crate::term::key::Key;
 use crate::term::{Parser, Winsize};
+
+const HOOK_EVENTS: [HookEvent; 5] = [
+  HookEvent::Started,
+  HookEvent::Running,
+  HookEvent::Unhealthy,
+  HookEvent::Stopped,
+  HookEvent::Failed,
+];
 
 struct ProcExited(u32);
 
 pub struct ProcInput(pub Key);
 
 pub struct DuplicateProc(pub Option<String>);
+
+pub enum ProcMsg {
+  RerunHook(HookEvent),
+  RerunCheck(usize),
+}
 
 /// How a proc task should react to `Stop` (`Kill` is always a hard kill).
 #[derive(Clone, Debug, Default)]
@@ -45,9 +64,13 @@ pub struct ProcTaskConfig {
   pub log: Option<LogResolver>,
   pub autostart: bool,
   pub autorestart: bool,
+  pub oneshot: bool,
   pub scrollback_len: usize,
   pub mouse_scroll_speed: usize,
   pub deps: Vec<TaskId>,
+  pub vars: Vars,
+  pub healthchecks: Vec<HealthCheckDef>,
+  pub hooks: HookSet,
 }
 
 impl ProcTaskConfig {
@@ -59,9 +82,13 @@ impl ProcTaskConfig {
       log: None,
       autostart: true,
       autorestart: false,
+      oneshot: false,
       scrollback_len: 1000,
       mouse_scroll_speed: 5,
       deps: Vec::new(),
+      vars: Vars::new(),
+      healthchecks: Vec::new(),
+      hooks: HookSet::default(),
     }
   }
 }
@@ -88,19 +115,80 @@ pub fn spawn_proc_task_with_id(
     log,
     autostart,
     autorestart,
+    oneshot,
     scrollback_len,
     mouse_scroll_speed,
     deps,
     label,
+    vars,
+    healthchecks,
+    hooks,
   } = config;
   let vt = SharedVt::new(Parser::new(24, 80, scrollback_len));
   let task_vt = vt.clone();
+
+  let mut pending_children: Vec<PendingChild> = Vec::new();
+  let mut check_vts: Vec<Option<SharedVt>> =
+    Vec::with_capacity(healthchecks.len());
+  let mut check_task_ids: Vec<Option<TaskId>> =
+    Vec::with_capacity(healthchecks.len());
+  for (i, def) in healthchecks.iter().enumerate() {
+    let child_vt = new_child_vt();
+    let id = plan_child(
+      parent,
+      task_path.as_ref(),
+      &format!("checks/{i}"),
+      Some(def.name.clone()),
+      child_vt.clone(),
+      &mut pending_children,
+    );
+    check_vts.push(Some(child_vt));
+    check_task_ids.push(id);
+  }
+
+  let mut hook_vts: HashMap<HookEvent, SharedVt> = HashMap::new();
+  let mut hook_task_ids: HashMap<HookEvent, TaskId> = HashMap::new();
+  for event in HOOK_EVENTS {
+    if hooks.get(event).is_some() {
+      let child_vt = new_child_vt();
+      if let Some(id) = plan_child(
+        parent,
+        task_path.as_ref(),
+        &format!("hooks/{}", event.label()),
+        None,
+        child_vt.clone(),
+        &mut pending_children,
+      ) {
+        hook_task_ids.insert(event, id);
+      }
+      hook_vts.insert(event, child_vt);
+    }
+  }
+
+  let runtime = ProcRuntime {
+    spec,
+    log,
+    stop,
+    scrollback_len,
+    mouse_scroll_speed,
+    autorestart,
+    oneshot,
+    vars,
+    healthchecks,
+    hooks,
+    check_vts,
+    check_task_ids,
+    hook_vts,
+    hook_task_ids,
+  };
+
   parent.spawn_async_with_id(
     task_id,
     TaskDef {
       stop_on_quit: true,
       autostart,
       autorestart,
+      oneshot,
       deps,
       path: task_path,
       label,
@@ -108,42 +196,107 @@ pub fn spawn_proc_task_with_id(
       ..Default::default()
     },
     move |ctx, receiver| async move {
-      proc_main(
-        ctx,
-        receiver,
-        spec,
-        task_vt,
-        log,
-        stop,
-        scrollback_len,
-        mouse_scroll_speed,
-        autorestart,
-      )
-      .await;
+      proc_main(ctx, receiver, task_vt, runtime).await;
     },
   );
+
+  for child in pending_children {
+    parent.register_with_id(
+      child.id,
+      TaskDef {
+        stop_on_quit: false,
+        path: Some(child.path),
+        label: child.label,
+        vt: Some(child.vt),
+        ..Default::default()
+      },
+      Box::new(|_| Box::new(NoopTask)),
+    );
+  }
+}
+
+struct PendingChild {
+  id: TaskId,
+  path: TaskPath,
+  label: Option<String>,
+  vt: SharedVt,
+}
+
+struct ProcRuntime {
+  spec: ProcessSpec,
+  log: Option<LogResolver>,
+  stop: StopSignal,
+  scrollback_len: usize,
+  mouse_scroll_speed: usize,
+  autorestart: bool,
+  oneshot: bool,
+  vars: Vars,
+  healthchecks: Vec<HealthCheckDef>,
+  hooks: HookSet,
+  check_vts: Vec<Option<SharedVt>>,
+  check_task_ids: Vec<Option<TaskId>>,
+  hook_vts: HashMap<HookEvent, SharedVt>,
+  hook_task_ids: HashMap<HookEvent, TaskId>,
+}
+
+fn plan_child(
+  parent: &TaskContext,
+  parent_path: Option<&TaskPath>,
+  seg: &str,
+  label: Option<String>,
+  vt: SharedVt,
+  out: &mut Vec<PendingChild>,
+) -> Option<TaskId> {
+  let parent_path = parent_path?;
+  let path =
+    TaskPath::new(format!("{}/{}", parent_path.as_str(), seg)).ok()?;
+  let id = parent.alloc_id();
+  out.push(PendingChild {
+    id,
+    path,
+    label,
+    vt,
+  });
+  Some(id)
 }
 
 async fn proc_main(
   ctx: TaskContext,
   mut receiver: UnboundedReceiver<TaskCmd>,
-  spec: ProcessSpec,
   vt: SharedVt,
-  mut log: Option<LogResolver>,
-  stop: StopSignal,
-  scrollback_len: usize,
-  mouse_scroll_speed: usize,
-  autorestart: bool,
+  runtime: ProcRuntime,
 ) {
+  let ProcRuntime {
+    spec,
+    mut log,
+    stop,
+    scrollback_len,
+    mouse_scroll_speed,
+    autorestart,
+    oneshot,
+    vars,
+    healthchecks,
+    hooks,
+    check_vts,
+    check_task_ids,
+    hook_vts,
+    hook_task_ids,
+  } = runtime;
+
+  let cwd: Option<OsString> = spec.cwd.clone().map(OsString::from);
+  let env: EnvOverrides =
+    spec.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
   let mut task_screen = TaskScreen::new(ctx.task_id, vt, mouse_scroll_speed);
   let mut screen_effects: Vec<TaskScreenEffect> = Vec::new();
 
   let mut process: Option<NativeProcess> = None;
-  // The log path is resolved per spawn (it may contain the pid).
   let mut current_log: Option<(std::path::PathBuf, u64)> = None;
   let mut read_buf = [0u8; 8 * 1024];
   let mut stdout_eof = false;
   let mut exit_code: Option<u32> = None;
+  let mut health_runner: Option<HealthRunner> = None;
+  let mut reported_running = false;
 
   loop {
     if stdout_eof
@@ -156,6 +309,7 @@ async fn proc_main(
     enum Next {
       Cmd(Option<TaskCmd>),
       Read(std::io::Result<usize>),
+      Health(crate::task::health::AggregateOutcome),
     }
     let read_fut = async {
       match process.as_mut() {
@@ -163,9 +317,16 @@ async fn proc_main(
         _ => pending().await,
       }
     };
+    let health_fut = async {
+      match health_runner.as_mut() {
+        Some(r) => r.next().await,
+        None => pending().await,
+      }
+    };
     let next = tokio::select! {
       cmd = receiver.recv() => Next::Cmd(cmd),
       n = read_fut => Next::Read(n),
+      outcome = health_fut => Next::Health(outcome),
     };
 
     match next {
@@ -177,21 +338,74 @@ async fn proc_main(
             if let Some(p) = &process {
               exit_code = None;
               stdout_eof = false;
+              reported_running = false;
               update_log_observer(
                 &mut task_screen,
                 &mut log,
                 &mut current_log,
                 p.pid(),
               );
+              let started_ok = run_lifecycle_hook(
+                &ctx,
+                &hooks,
+                HookEvent::Started,
+                &vars,
+                cwd.as_ref(),
+                &env,
+                &hook_vts,
+                &hook_task_ids,
+              )
+              .await;
+              if !started_ok {
+                log::warn!("started hook failed; killing proc");
+                run_lifecycle_hook(
+                  &ctx,
+                  &hooks,
+                  HookEvent::Failed,
+                  &vars,
+                  cwd.as_ref(),
+                  &env,
+                  &hook_vts,
+                  &hook_task_ids,
+                )
+                .await;
+                if let Some(p) = process.as_mut() {
+                  p.kill().await.log_ignore();
+                }
+                continue;
+              }
+              if oneshot {
+                ctx.send(KernelCommand::TaskStatusChanged(
+                  TaskStatus::Starting,
+                ));
+              } else if healthchecks.is_empty() {
+                ctx.send(KernelCommand::TaskStarted);
+                reported_running = true;
+              } else {
+                ctx.send(KernelCommand::TaskStatusChanged(
+                  TaskStatus::Starting,
+                ));
+                health_runner = Some(HealthRunner::spawn(
+                  &healthchecks,
+                  &vars,
+                  cwd.as_ref(),
+                  &env,
+                  &check_vts,
+                  &check_task_ids,
+                  &ctx,
+                ));
+              }
             }
           }
         }
         TaskCmd::Stop => {
+          health_runner = None;
           if let Some(p) = process.as_mut() {
             stop_process(p, &stop, task_screen.vt(), &spec).await;
           }
         }
         TaskCmd::Kill => {
+          health_runner = None;
           if let Some(p) = process.as_mut() {
             p.kill().await.log_ignore();
           }
@@ -200,6 +414,19 @@ async fn proc_main(
           let msg = match msg.downcast::<ProcExited>() {
             Ok(exited) => {
               exit_code = Some(exited.0);
+              health_runner = None;
+              reported_running = false;
+              run_lifecycle_hook(
+                &ctx,
+                &hooks,
+                HookEvent::Stopped,
+                &vars,
+                cwd.as_ref(),
+                &env,
+                &hook_vts,
+                &hook_task_ids,
+              )
+              .await;
               if let Some(p) = process.as_mut() {
                 p.on_exited();
               }
@@ -229,6 +456,25 @@ async fn proc_main(
             }
             Err(msg) => msg,
           };
+          let msg = match msg.downcast::<ProcMsg>() {
+            Ok(proc_msg) => {
+              handle_rerun(
+                *proc_msg,
+                &ctx,
+                &hooks,
+                &healthchecks,
+                &vars,
+                cwd.as_ref(),
+                &env,
+                &hook_vts,
+                &hook_task_ids,
+                &check_vts,
+                &check_task_ids,
+              );
+              continue;
+            }
+            Err(msg) => msg,
+          };
           let msg = match msg.downcast::<DuplicateProc>() {
             Ok(dup) => {
               let new_id = ctx.alloc_id();
@@ -243,10 +489,14 @@ async fn proc_main(
                   log: None,
                   autostart: true,
                   autorestart,
+                  oneshot,
                   scrollback_len,
                   mouse_scroll_speed,
                   deps: Vec::new(),
                   label: dup.0,
+                  vars: Vars::new(),
+                  healthchecks: Vec::new(),
+                  hooks: HookSet::default(),
                 },
               );
               continue;
@@ -257,6 +507,63 @@ async fn proc_main(
           log::error!("ProcTask received unknown Msg");
         }
       },
+
+      Next::Health(outcome) => {
+        use crate::task::health::AggregateOutcome;
+        match outcome {
+          AggregateOutcome::BecameHealthy => {
+            let ok = run_lifecycle_hook(
+              &ctx,
+              &hooks,
+              HookEvent::Running,
+              &vars,
+              cwd.as_ref(),
+              &env,
+              &hook_vts,
+              &hook_task_ids,
+            )
+            .await;
+            if !ok {
+              run_lifecycle_hook(
+                &ctx,
+                &hooks,
+                HookEvent::Failed,
+                &vars,
+                cwd.as_ref(),
+                &env,
+                &hook_vts,
+                &hook_task_ids,
+              )
+              .await;
+              ctx.send(KernelCommand::TaskStatusChanged(
+                TaskStatus::Unhealthy,
+              ));
+              continue;
+            }
+            if reported_running {
+              ctx.send(KernelCommand::TaskStatusChanged(TaskStatus::Running));
+            } else {
+              ctx.send(KernelCommand::TaskStarted);
+              reported_running = true;
+            }
+          }
+          AggregateOutcome::BecameUnhealthy => {
+            ctx.send(KernelCommand::TaskStatusChanged(TaskStatus::Unhealthy));
+            run_lifecycle_hook(
+              &ctx,
+              &hooks,
+              HookEvent::Unhealthy,
+              &vars,
+              cwd.as_ref(),
+              &env,
+              &hook_vts,
+              &hook_task_ids,
+            )
+            .await;
+          }
+          AggregateOutcome::Noop => {}
+        }
+      }
 
       Next::Read(Ok(0)) => stdout_eof = true,
       Next::Read(Ok(n)) => {
@@ -270,6 +577,100 @@ async fn proc_main(
         log::warn!("Process read error: {}", e);
         stdout_eof = true;
       }
+    }
+  }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_lifecycle_hook(
+  ctx: &TaskContext,
+  hooks: &HookSet,
+  event: HookEvent,
+  vars: &Vars,
+  cwd: Option<&OsString>,
+  env: &EnvOverrides,
+  hook_vts: &HashMap<HookEvent, SharedVt>,
+  hook_task_ids: &HashMap<HookEvent, TaskId>,
+) -> bool {
+  let Some(def) = hooks.get(event) else {
+    return true;
+  };
+  let out_vt = hook_vts.get(&event).cloned();
+  let task_id = hook_task_ids.get(&event).copied();
+  if let Some(id) = task_id {
+    ctx.send_for_task(id, KernelCommand::TaskStarted);
+  }
+  let res = run_hook(def, vars, cwd, env, out_vt).await;
+  let (ok, code) = match &res {
+    Ok(()) => (true, 0u32),
+    Err(crate::task::hooks::HookError::ExitCode(c)) => (false, *c as u32),
+    Err(crate::task::hooks::HookError::IoError(_)) => (false, 255),
+  };
+  if let Some(id) = task_id {
+    ctx.send_for_task(id, KernelCommand::TaskStopped(code));
+  }
+  ok
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_rerun(
+  msg: ProcMsg,
+  ctx: &TaskContext,
+  hooks: &HookSet,
+  healthchecks: &[HealthCheckDef],
+  vars: &Vars,
+  cwd: Option<&OsString>,
+  env: &EnvOverrides,
+  hook_vts: &HashMap<HookEvent, SharedVt>,
+  hook_task_ids: &HashMap<HookEvent, TaskId>,
+  check_vts: &[Option<SharedVt>],
+  check_task_ids: &[Option<TaskId>],
+) {
+  match msg {
+    ProcMsg::RerunHook(event) => {
+      let Some(def) = hooks.get(event) else {
+        return;
+      };
+      let def = crate::config::health::HookDef {
+        cmd: def.cmd.clone(),
+        async_: false,
+      };
+      let vars = vars.clone();
+      let cwd = cwd.cloned();
+      let env = env.clone();
+      let out_vt = hook_vts.get(&event).cloned();
+      let task_id = hook_task_ids.get(&event).copied();
+      let ks = ctx.clone();
+      tokio::spawn(async move {
+        if let Some(id) = task_id {
+          ks.send_for_task(id, KernelCommand::TaskStarted);
+        }
+        let res = run_hook(&def, &vars, cwd.as_ref(), &env, out_vt).await;
+        let code = match res {
+          Ok(()) => 0u32,
+          Err(crate::task::hooks::HookError::ExitCode(c)) => c as u32,
+          Err(crate::task::hooks::HookError::IoError(_)) => 255,
+        };
+        if let Some(id) = task_id {
+          ks.send_for_task(id, KernelCommand::TaskStopped(code));
+        }
+      });
+    }
+    ProcMsg::RerunCheck(idx) => {
+      let Some(def) = healthchecks.get(idx) else {
+        return;
+      };
+      let cmd = crate::config::health::substitute_vars(&def.cmd, vars);
+      let timeout = def.timeout;
+      let cwd = cwd.cloned();
+      let env = env.clone();
+      let out_vt = check_vts.get(idx).cloned().flatten();
+      let task_id = check_task_ids.get(idx).copied().flatten();
+      let ks = ctx.clone();
+      tokio::spawn(async move {
+        run_check_once_manual(cmd, cwd, env, timeout, out_vt, task_id, ks)
+          .await;
+      });
     }
   }
 }
@@ -326,10 +727,7 @@ fn start_instance(
     parser.set_size(size.y, size.x);
   }
   match spawn_native(ctx, spec, size) {
-    Ok(process) => {
-      ctx.send(KernelCommand::TaskStarted);
-      Some(process)
-    }
+    Ok(process) => Some(process),
     Err(err) => {
       log::warn!("Process spawn error: {}", err);
       ctx.send(KernelCommand::TaskStopped(255));
@@ -660,6 +1058,95 @@ mod tests {
       .unwrap();
 
     let _ = std::fs::remove_file(&marker);
+  }
+
+  async fn status_of(
+    pc: &TaskContext,
+    path: &str,
+  ) -> Option<crate::kernel::task::TaskStatus> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    pc.send(KernelCommand::Query(KernelQuery::ListTasks(None), tx));
+    let resp = tokio::time::timeout(Duration::from_secs(1), rx)
+      .await
+      .ok()?
+      .ok()?;
+    match resp {
+      KernelQueryResponse::TaskList(list) => list
+        .into_iter()
+        .find(|t| t.path.as_ref().map(|p| p.to_string()).as_deref() == Some(path))
+        .map(|t| t.status),
+      _ => None,
+    }
+  }
+
+  #[tokio::test]
+  async fn failing_healthcheck_marks_unhealthy_and_gates_dependent() {
+    use crate::config::health::HealthCheckDef;
+    use crate::kernel::task::TaskStatus;
+
+    let kernel = Kernel::new();
+    let pc = kernel.context();
+
+    let check = HealthCheckDef {
+      name: "always_fail".to_string(),
+      cmd: "false".to_string(),
+      interval: Duration::from_millis(50),
+      timeout: Duration::from_secs(1),
+      start_period: Duration::from_millis(0),
+      retries: 1,
+      min_passes: 1,
+    };
+    let provider_id = pc.alloc_id();
+    spawn_proc_task_with_id(
+      &pc,
+      provider_id,
+      Some(TaskPath::new("/provider").unwrap()),
+      ProcTaskConfig {
+        healthchecks: vec![check],
+        ..ProcTaskConfig::new(ProcessSpec::from_argv(vec![
+          "sleep".to_string(),
+          "100".to_string(),
+        ]))
+      },
+    );
+
+    let dependent_id = pc.alloc_id();
+    spawn_proc_task_with_id(
+      &pc,
+      dependent_id,
+      Some(TaskPath::new("/dependent").unwrap()),
+      ProcTaskConfig {
+        deps: vec![provider_id],
+        ..ProcTaskConfig::new(ProcessSpec::from_argv(vec![
+          "sleep".to_string(),
+          "100".to_string(),
+        ]))
+      },
+    );
+
+    let kernel_task = tokio::spawn(kernel.run());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+      let st = status_of(&pc, "/provider").await;
+      if matches!(st, Some(TaskStatus::Unhealthy)) {
+        break;
+      }
+      assert!(
+        !matches!(st, Some(TaskStatus::Running)),
+        "provider must never reach Running with a failing check, got {st:?}"
+      );
+      assert!(Instant::now() < deadline, "provider never became Unhealthy");
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+      status_of(&pc, "/dependent").await,
+      Some(TaskStatus::NotStarted),
+      "dependent must stay gated while provider is not Running"
+    );
+
+    kernel_task.abort();
   }
 }
 

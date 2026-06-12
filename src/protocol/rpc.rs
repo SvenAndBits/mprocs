@@ -26,6 +26,9 @@ pub enum DkRequest {
     path: String,
   },
   Shutdown,
+  Inspect {
+    path: String,
+  },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -33,6 +36,7 @@ pub enum DkResponse {
   Ok,
   TaskList(Vec<DkTaskInfo>),
   Screen(Option<String>),
+  TaskDetail(Option<DkTaskDetail>),
   Error(String),
 }
 
@@ -40,4 +44,12 @@ pub enum DkResponse {
 pub struct DkTaskInfo {
   pub path: String,
   pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DkTaskDetail {
+  pub path: String,
+  pub status: String,
+  pub deps: Vec<DkTaskInfo>,
+  pub children: Vec<DkTaskInfo>,
 }

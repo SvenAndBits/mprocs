@@ -7,10 +7,15 @@ pub async fn rpc_request(
   working_dir: &Path,
   req: DkRequest,
   spawn_server: bool,
+  config_name: &str,
 ) -> anyhow::Result<DkResponse> {
   let (mut sender, mut receiver) =
-    connect_client_socket::<CltToSrv, SrvToClt>(working_dir, spawn_server)
-      .await?;
+    connect_client_socket::<CltToSrv, SrvToClt>(
+      working_dir,
+      spawn_server,
+      config_name,
+    )
+    .await?;
   sender.send(CltToSrv::Rpc(req)).await?;
   match receiver.recv().await {
     Some(Ok(SrvToClt::Rpc(resp))) => Ok(resp),

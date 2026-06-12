@@ -1,3 +1,4 @@
+pub mod child;
 pub mod view;
 
 use anyhow::bail;
