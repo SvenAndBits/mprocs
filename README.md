@@ -81,6 +81,23 @@ cargo install --path src
 
 This installs the `dekit` binary. (The crate lives under `src/`.)
 
+### Nix
+
+A flake is provided, so you can build or run any revision without cloning:
+
+```sh
+nix run github:SvenAndBits/mprocs                       # latest master
+nix run github:SvenAndBits/mprocs/9da2a40               # a specific commit
+```
+
+Pin to a **commit**, not a branch or tag. `master` moves, and tags can be
+force-moved; a commit hash builds exactly the same source every time. To add
+dekit to your own flake:
+
+```nix
+inputs.dekit.url = "github:SvenAndBits/mprocs/9da2a40";
+```
+
 ## Quick start
 
 Create a `dekit.yaml` in your project:
