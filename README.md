@@ -278,7 +278,9 @@ procs:
 
 Load variables from one or more dotenv files. Files are applied in order (later
 files override earlier ones), and inline `env` overrides file values. Values
-support the same `%VAR%` substitution as `env` and `vars`.
+support the same `%VAR%` substitution as `env` and `vars`. A listed file that
+doesn't exist is skipped, so you can point at optional files like
+`.env.local`; a file that exists but can't be read or parsed is still an error.
 
 ```yaml
 procs:

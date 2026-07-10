@@ -155,9 +155,18 @@ fn parse_env_file(node: &CfgNode<'_>, cx: &CfgCx) -> Result<Vars> {
 
   let mut vars = Vars::new();
   for path in paths {
-    let iter = dotenvy::from_path_iter(&path).map_err(|e| {
-      node.error(format!("failed to read env_file {}: {e}", path.display()))
-    })?;
+    // Missing files are optional (skipped); read/parse errors on files that do
+    // exist still fail, so typos and broken files aren't silently ignored.
+    let iter = match dotenvy::from_path_iter(&path) {
+      Ok(iter) => iter,
+      Err(e) if e.not_found() => continue,
+      Err(e) => {
+        return Err(node.error(format!(
+          "failed to read env_file {}: {e}",
+          path.display()
+        )));
+      }
+    };
     for entry in iter {
       let (k, v) = entry.map_err(|e| {
         node.error(format!("failed to parse env_file {}: {e}", path.display()))
@@ -262,21 +271,28 @@ mod tests {
   }
 
   #[test]
-  fn env_file_missing_is_an_error() {
-    let raw: serde_yaml::Value = serde_yaml::from_str(
-      "shell: echo hi\nenv_file: /nonexistent/mprocs-does-not-exist.env\n",
-    )
-    .unwrap();
-    let node = CfgNode::new(&raw, CfgPath::root());
-    let cx = CfgCx::new(std::path::PathBuf::from("."));
-    let result = proc_from_cfg(
-      "web".to_string(),
-      &node,
-      &cx,
-      &Default::default(),
-      &Default::default(),
+  fn env_file_missing_is_skipped() {
+    let yaml =
+      "shell: echo hi\nenv_file: /nonexistent/mprocs-does-not-exist.env\n";
+    let spec = build_spec(yaml);
+    assert!(spec.env.is_empty());
+  }
+
+  #[test]
+  fn env_file_skips_missing_and_loads_present() {
+    let present = write_tmp("present.env", "KEEP=yes\n");
+    let yaml = format!(
+      "shell: echo hi\nenv_file:\n  - /nonexistent/mprocs-missing.env\n  - {}\n",
+      present.display(),
     );
-    assert!(result.is_err());
+
+    let spec = build_spec(&yaml);
+    assert_eq!(
+      spec.env.get("KEEP").cloned().flatten().as_deref(),
+      Some("yes")
+    );
+
+    std::fs::remove_file(present).ok();
   }
 }
 

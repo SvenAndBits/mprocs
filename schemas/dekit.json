@@ -103,7 +103,7 @@
             { "type": "string" },
             { "type": "array", "items": { "type": "string" } }
           ],
-          "description": "Load env variables from one or more dotenv files, in order (later files override earlier ones). `env` overrides file values. %VAR% tokens are substituted from `vars`."
+          "description": "Load env variables from one or more dotenv files, in order (later files override earlier ones). `env` overrides file values. %VAR% tokens are substituted from `vars`. Missing files are skipped; files that exist but can't be read or parsed are an error."
         },
         "add_path": {
           "type": "array",

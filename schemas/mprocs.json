@@ -118,7 +118,7 @@
               }
             },
             "env_file": {
-              "description": "Load env variables from one or more dotenv files. Files are loaded in order (first to last); later files override earlier ones, and variables set via `env` override values from files. Values support the same %VAR% substitution as `env` and `vars`. Prefix a path with <CONFIG_DIR> to resolve it relative to the config file's directory.",
+              "description": "Load env variables from one or more dotenv files. Files are loaded in order (first to last); later files override earlier ones, and variables set via `env` override values from files. Values support the same %VAR% substitution as `env` and `vars`. Prefix a path with <CONFIG_DIR> to resolve it relative to the config file's directory. Missing files are skipped; files that exist but can't be read or parsed are an error.",
               "oneOf": [
                 {
                   "type": "string"
