@@ -1,412 +1,400 @@
-<div align="center" markdown="1">
-  <sup>Special thanks to:</sup>
-  <br>
-  <a href="https://go.warp.dev/mprocs">
-    <img alt="Warp sponsorship" width="400" src="https://github.com/warpdotdev/brand-assets/blob/main/Github/Sponsor/Warp-Github-LG-02.png">
-  </a>
+# dekit
 
-### [Warp, built for coding with multiple AI agents](https://go.warp.dev/mprocs)
-[Available for MacOS, Linux, & Windows](https://go.warp.dev/mprocs)<br>
+_dekit_ is a process supervisor for local development. It runs the commands
+your project needs — `webpack serve`, `jest --watch`, `node src/server.js`,
+databases, containers — and gives you one place to start, watch, and interact
+with all of them.
 
-</div>
+dekit is the successor name to [mprocs](https://github.com/pvolok/mprocs): a
+per-directory background daemon supervises your processes and the terminal UI
+is a client you can attach and detach at will. This fork builds on that base
+and adds a **process-orchestration layer** — the pieces you reach for once a
+dev stack grows past "a few commands in parallel":
 
-# mprocs
+- **Health checks.** Gate a process as _Running_ only once a command reports it
+  is actually ready (Docker-style `interval` / `timeout` / `retries`).
+- **Dependencies.** Start a process only after the ones it depends on are up.
+- **One-shot tasks.** Migrations, seeders, builds — run once, then release
+  whatever was waiting on them.
+- **Lifecycle hooks.** Run a command when a process starts, becomes healthy,
+  goes unhealthy, stops, or fails.
+- **A dependency-graph dashboard.** See how your processes connect and what is
+  gating what.
+- Smaller conveniences: `env_file` (dotenv loading), a configurable
+  `restart_delay`, and per-process `%VAR%` substitution.
 
-_mprocs_ runs multiple commands in parallel and shows output of each command
-separately.
-
-When you work on a project you very often need the same list of commands to be
-running. For example: `webpack serve`, `jest --watch`, `node src/server.js`.
-With mprocs you can list these command in `mprocs.yaml` and run all of them by
-running `mprocs`. Then you can switch between outputs of running commands and
-interact with them.
-
-It is similar to
-[concurrently](https://github.com/open-cli-tools/concurrently) but _mprocs_
-shows output of each command separately and allows to interact with processes
-(you can even work in _vim_ inside _mprocs_).
+The classic mprocs CLI remains available via `dekit mprocs …`.
 
 <!--ts-->
 
-- [Screenshots](#screenshots)
+- [Concepts](#concepts)
 - [Installation](#installation)
-  - [Download binary (Linux, Macos, Windows)](#download-binary-linux-macos-windows)
-  - [npm (Linux, Macos, Windows)](#npm-linux-macos-windows)
-  - [homebrew (Macos)](#homebrew-macos)
-  - [cargo (All platforms)](#cargo-all-platforms)
-  - [scoop (Windows)](#scoop-windows)
-  - [AUR (Arch Linux)](#aur-arch-linux)
-- [Usage](#usage)
-  - [Config](#config)
-    - [Keymap](#keymap)
-    - [$select operator](#select-operator)
-    - [Running scripts from package.json](#running-scripts-from-packagejson)
-  - [Default keymap](#default-keymap)
-  - [Remote control](#remote-control)
-- [FAQ](#faq)
-  - [mprocs vs tmux/screen](#mprocs-vs-tmuxscreen)
-
-<!-- Created by https://github.com/ekalinin/github-markdown-toc -->
-<!-- Added by: pvolok, at: Sun Jul  3 22:53:57 +07 2022 -->
+- [Quick start](#quick-start)
+- [The daemon and the TUI](#the-daemon-and-the-tui)
+- [CLI](#cli)
+- [Configuration](#configuration)
+  - [Processes](#processes)
+  - [Dependencies](#dependencies)
+  - [Health checks](#health-checks)
+  - [One-shot tasks](#one-shot-tasks)
+  - [Lifecycle hooks](#lifecycle-hooks)
+  - [Variables](#variables)
+  - [Environment files](#environment-files)
+  - [Reusable registries and defaults](#reusable-registries-and-defaults)
+  - [Full config reference](#full-config-reference)
+- [Dashboard](#dashboard)
+- [Default keymap](#default-keymap)
+- [Running the legacy mprocs CLI](#running-the-legacy-mprocs-cli)
+- [Credits](#credits)
 
 <!--te-->
 
-## Screenshots
+## Concepts
 
-<img src="img/screenshot1.png" width="900" height="645" />
-<img src="img/screenshot2.png" width="900" height="645" />
+A **process** (or _task_) is one command dekit supervises. Every process moves
+through a lifecycle:
+
+- **Starting** — spawned, but not yet considered ready. If it has health
+  checks, it stays here until they pass. If it is a one-shot, it stays here
+  while it runs.
+- **Running** — up and (if configured) healthy. Dependents are now allowed to
+  start.
+- **Completed** — a one-shot that exited 0. Dependents are released.
+- **Stopped / Exited / Failed** — no longer running (cleanly stopped, exited on
+  its own, or failed a check / exited non-zero).
+
+The orchestration features this fork adds — dependencies, health checks, and
+one-shots — all work by controlling when a process is allowed to advance to
+_Running_ / _Completed_, and therefore when the processes waiting on it may
+start.
 
 ## Installation
 
-[![Packaging status](https://repology.org/badge/vertical-allrepos/mprocs.svg)](https://repology.org/project/mprocs/versions)
-
-### Download binary (Linux, Macos, Windows)
-
-[Download](https://github.com/pvolok/mprocs/releases) executable for your
-platform and put it into a directory included in PATH.
-
-### npm (Linux, Macos, Windows)
+This fork is distributed as source only — there is no npm, Homebrew, or other
+prebuilt package. Build it from source with a recent Rust toolchain:
 
 ```sh
-npm install -g mprocs
+git clone https://github.com/SvenAndBits/mprocs.git
+cd mprocs
+cargo install --path src
 ```
 
-```sh
-yarn global add mprocs
-```
+This installs the `dekit` binary. (The crate lives under `src/`.)
 
-### homebrew (Macos, Linux)
+## Quick start
 
-```sh
-brew install mprocs
-```
-
-### cargo (All platforms)
-
-```sh
-cargo install mprocs
-```
-
-### scoop (Windows)
-
-```sh
-scoop install mprocs
-```
-
-### AUR (Arch Linux)
-
-```sh
-yay mprocs
-```
-
-```sh
-yay mprocs-bin
-```
-
-## Usage
-
-1. Run `mprocs cmd1 cmd2 …` (example: `mprocs "yarn test -w" "webpack serve"`)
-
-OR
-
-1. Create `mprocs.yaml` file
-2. Run `mprocs` command
-
-Example `mprocs.yaml`:
+Create a `dekit.yaml` in your project:
 
 ```yaml
 procs:
-  nvim:
-    cmd: ["nvim"]
   server:
-    shell: "nodemon server.js"
-  webpack: "webpack serve"
+    shell: "node src/server.js"
+    autostart: true
   tests:
     shell: "jest -w"
     env:
       NODE_ENV: test
+  webpack: "webpack serve"
 ```
 
-### Config
+Then, from that directory:
 
-[JSON/YAML Configuration Schema](https://raw.githubusercontent.com/pvolok/mprocs/master/schemas/mprocs.json)
+```sh
+dekit          # start the daemon (if needed) and open the TUI
+```
 
-There are two kinds of configs: global and local. _Global_ config is loaded
-from `~/.config/mprocs/mprocs.yaml` (or
-`~\AppData\Roaming\mprocs\mprocs.yaml` on Windows). _Local_ config
-is loaded from `mprocs.yaml` from current directory (or set via cli argument:
-`mprocs --config ./cfg/mprocs.yaml`). Settings in the _local_ config override
-settings in the _global_ config.
+Switch between processes with `j`/`k`, start/stop them, and interact with their
+output — you can even run `vim` inside a process pane.
 
-- **procs**: _object_ - Processes to run. Only allowed in local config.
-  - **shell**: _string_ - Shell command to run (exactly one of **shell** or
-    **cmd** must be provided).
-  - **cmd**: _array<string>_ - Array of command and args to run (exactly one of
-    **shell** or **cmd** must be provided).
-  - **cwd**: _string_ - Set working directory for the process. Prefix
-    `<CONFIG_DIR>` will be replaced with the path of the directory where the
-    config is located.
-  - **env**: _object<string, string|null>_ - Set env variables. Object keys are
-    variable names. Assign variable to null, to clear variables inherited from
-    parent process.
-  - **env_file**: _string|array<string>_ - Load env variables from one or more
-    dotenv files. Files are loaded in order (first to last); later files
-    override earlier ones, and variables set via **env** override values from
-    files. Values support the same `%VAR%` substitution as **env** and
-    **vars**. Prefix a path with `<CONFIG_DIR>` to resolve it relative to the
-    config file's directory.
-  - **add_path**: _string|array<string>_ - Add entries to the _PATH_
-    environment variable.
-  - **autostart**: _bool_ - Start process when mprocs starts. Default: _true_.
-  - **autorestart**: _bool_ - Restart process when it exits. Default: false. Note: If process exits within 1 second of starting, it will not be restarted.
-  - **restart_delay**: _number_ - Delay in milliseconds before an autorestart is triggered after the process exits. Default: 1000.
-  - **stop**: _"SIGINT"|"SIGTERM"|"SIGKILL"|{send-keys: array<key>}|{cmd: string}|"hard-kill"_ -
-    A way to stop a process (using `x` key or when quitting mprocs). The `cmd`
-    form runs a shell command (e.g. `podman compose down`) instead of
-    signaling the proc. The proc is expected to exit on its own once the
-    command takes effect.
-  - **log**: _bool|string|object|null_ - Process logging config. A string is a
-    shorthand for `{ dir: ... }`. `true` enables logging with defaults.
-    - **dir**: _string|null_ - Directory for per-process log files.
-    - **file**: _string|null_ - Log file path relative to **dir**.
-      Supports `{name}`, `{id}`, `{pid}`, and `{ts}` placeholders.
-      Default: _"{name}.log"_.
-    - **enabled**: _bool_ - Enable or disable logging. Default: _true_.
-    - **mode**: _"append"|"truncate"_ - Whether append to or replace an existing
-      log file. Default: _"append"_.
-    Prefix `<CONFIG_DIR>` will be replaced with the path of the directory where
-    the config is located. Per-process **log** values merge with the top-level
-    **proc_log** config.
-- **hide_keymap_window**: _bool_ - Hide the pane at the bottom of the screen
-  showing key bindings.
-- **mouse_scroll_speed**: _integer_ - Number of lines to scroll per one mouse
-  scroll.
-- **scrollback**: _integer_ - Scrollback size. Default: _1000_.
-- **proc_list_width**: _integer_ - Process list window width.
-- **proc_log**: _bool|string|object|null_ - Default logging config for
-  processes. Accepts the same shape as per-process **log**.
-- **keymap_procs**: _object_ - Key bindings for process list. See
-  [Keymap](#keymap).
-- **keymap_term**: _object_ - Key bindings for terminal window. See
-  [Keymap](#keymap).
-- **keymap_copy**: _object_ - Key bindings for copy mode. See
-  [Keymap](#keymap).
+## The daemon and the TUI
 
-#### Keymap
+dekit separates supervision from the UI:
 
-Default key bindings can be overridden in config using _keymap_procs_,
-_keymap_term_, or _keymap_copy_ fields. Available commands are documented in
-the [Remote control](#remote-control) section.
+- The **daemon** owns the processes. There is one daemon per working directory.
+- The **TUI** is a client that attaches to the daemon. Closing it does not stop
+  your processes by default — reattach any time with `dekit attach`.
 
-There are three keymap levels:
-
-- Default keymaps
-- `~/.config/mprocs/mprocs.yaml` (or `~\AppData\Roaming\mprocs\mprocs.yaml` on Windows)
-- `./mprocs.yaml` (can be overridden by the _-c/--config_ cli arg)
-
-Lower levels override bindings from previous levels. Key bindings from previous
-levels can be cleared by specifying `reset: true` field at the same level as
-keys.
-
-Key bindings are defined between `<` and `>`, e.g., `<Enter>` (enter key), `<Down>` (down arrow), `<Up>` (up arrow), `<C-q>` (CTRL + q).
+Control what happens when the last client disconnects with `on_client_exit` in
+`dekit.yaml`:
 
 ```yaml
-keymap_procs: # keymap when process list is focused
-  <C-q>: { c: toggle-focus }
-  <C-a>: null # unbind key
-keymap_term: # keymap when terminal is focused
-  reset: true
-  <C-q>: { c: toggle-focus }
-  <C-j>:
-    c: batch
-    cmds:
-      - { c: focus-procs }
-      - { c: next-proc }
+on_client_exit: detach   # default: leave the daemon and procs running
+# on_client_exit: stop_all  # stop everything and shut the daemon down
 ```
 
-#### `$select` operator
+Typical lifecycle:
 
-You can define different values depending on the current operating system. Any
-value in config can be wrapped with a _$select_ operator. To provide different
-values based on current OS define an object with:
+```sh
+dekit up        # start the daemon and all autostart procs (no TUI)
+dekit attach    # open the TUI against the running daemon
+dekit down      # stop all procs and shut the daemon down
+```
 
-- First field `$select: os`
-- Fields defining values for different OSes: `macos: value`. Possible
-  values are listed here:
-  https://doc.rust-lang.org/std/env/consts/constant.OS.html.
-- Field `$else: default value` will be matched if no value was defined for
-  current OS. If current OS is not matched and field `$else` is missing, then
-  mprocs will fail to load config.
+## CLI
 
-Example `mprocs.yaml`:
+Every command talks to the daemon for the current directory (override with
+`-C/--chdir`). Add `--json` to any read command for machine-readable output —
+useful for scripts and coding agents.
+
+Process control:
+
+```sh
+dekit ls [glob]              # list tasks (add --json)
+dekit start <path>           # start a task
+dekit stop <path>            # stop a task
+dekit kill <path>            # force-kill a task
+dekit restart <path>         # restart a task
+dekit inspect <path>         # status + deps + health checks
+dekit screen <path>          # dump a task's current terminal screen
+dekit spawn --path <path> -- <cmd...>   # add and start an ad-hoc task
+```
+
+Daemon management:
+
+```sh
+dekit server start    # start the daemon for this directory
+dekit server stop     # stop it
+dekit server status   # show status (add --json)
+dekit server list     # list daemons on this machine
+dekit server clean    # remove stale lock files
+dekit server run --dir <dir>   # run a daemon in the foreground
+```
+
+`-c/--config <name>` selects the config file to load (default: `dekit.yaml`).
+
+## Configuration
+
+dekit loads `dekit.yaml` from the current directory. The full JSON/YAML schema
+is at
+[`schemas/dekit.json`](https://raw.githubusercontent.com/SvenAndBits/mprocs/master/schemas/dekit.json).
+
+### Processes
 
 ```yaml
 procs:
-  my process:
-    shell:
-      $select: os
-      windows: "echo %TEXT%"
-      $else: "echo $TEXT"
+  web:
+    shell: "node server.js"     # shell command (or use `cmd: [...]` for argv)
+    cwd: <CONFIG_DIR>/app       # working dir; <CONFIG_DIR> = config's directory
     env:
-      TEXT:
-        $select: os
-        windows: Windows
-        linux: Linux
-        macos: Macos
-        freebsd: FreeBSD
+      NODE_ENV: development     # null clears an inherited variable
+    add_path: ["./node_modules/.bin"]
+    autostart: true             # start when dekit starts (default: false)
+    autorestart: true           # restart on exit (default: false)
+    restart_delay: 1000         # ms to wait before an autorestart (default: 1000)
+    stop: SIGINT                # how to stop; see schema for all forms
 ```
 
-#### Running scripts from package.json
+`stop` accepts `SIGINT` / `SIGTERM` / `SIGKILL` / `hard-kill`, a
+`{ send-keys: [...] }` form, or a `{ cmd: "docker compose down" }` form that
+runs a command instead of signaling the process.
 
-If you run _mprocs_ with an `--npm` argument, it will load scripts from
-`package.json`. But the scripts are not run by default, and you can launch
-desired scripts manually.
+### Dependencies
 
-```sh
-# Run mprocs with scripts from package.json
-mprocs --npm
+`deps` lists processes that must be _Running_ (or _Completed_, for one-shots)
+before this one starts:
+
+```yaml
+procs:
+  db:
+    shell: "docker compose up postgres"
+  api:
+    shell: "node api.js"
+    deps: [db]        # api won't start until db is up
 ```
 
-#### Running processes from Procfile
+### Health checks
 
-You can specify a `Procfile` to load procs from:
+A process with health checks stays _Starting_ until a check passes, so its
+dependents wait for it to be genuinely ready — not just spawned:
 
-```sh
-mprocs --procfile ./Procfile.dev
-
-# default: Profile
-mprocs --procfile
-
-# autostart all processes
-mprocs --procfile --on-init '{c: restart-all}'
+```yaml
+procs:
+  db:
+    shell: "docker compose up postgres"
+    healthchecks:
+      - cmd: "pg_isready -h localhost -p 5432"
+        interval: 2s        # time between checks (default: 10s)
+        timeout: 5s         # per-check timeout (default: 5s)
+        start_period: 10s   # grace period where failures don't count (default: 0s)
+        retries: 3          # consecutive failures before unhealthy (default: 3)
+        min_passes: 1       # consecutive passes before healthy (default: 1)
 ```
 
-### Default keymap
+Durations accept `ms`, `s`, `m`, `h` (a bare number means seconds).
+
+### One-shot tasks
+
+A one-shot runs to completion, then releases its dependents. It becomes
+_Completed_ on exit 0, or _Exited_ on failure (which keeps dependents blocked).
+One-shots and health checks are mutually exclusive.
+
+```yaml
+procs:
+  migrate:
+    shell: "npm run db:migrate"
+    oneshot: true
+    deps: [db]
+  api:
+    shell: "node api.js"
+    deps: [migrate]   # waits for the migration to finish successfully
+```
+
+### Lifecycle hooks
+
+Run a command in response to a process transition. Set `async: true` to fire
+and forget without blocking the transition:
+
+```yaml
+procs:
+  api:
+    shell: "node api.js"
+    hooks:
+      running:
+        cmd: "curl -fsS http://localhost:3000/warm || true"
+        async: true
+      failed:
+        cmd: "notify-send 'api failed'"
+```
+
+Available events: `started`, `running`, `unhealthy`, `stopped`, `failed`.
+
+### Variables
+
+`vars` defines per-process values substituted as `%NAME%` in `cmd` / `shell` /
+`env` / `cwd` and in health-check and hook commands:
+
+```yaml
+procs:
+  db:
+    shell: "docker compose up postgres"
+    vars:
+      HOST: localhost
+      PORT: 5432
+    healthchecks:
+      - cmd: "nc -z %HOST% %PORT%"
+```
+
+### Environment files
+
+Load variables from one or more dotenv files. Files are applied in order (later
+files override earlier ones), and inline `env` overrides file values. Values
+support the same `%VAR%` substitution as `env` and `vars`.
+
+```yaml
+procs:
+  web:
+    shell: "node server.js"
+    env_file:
+      - <CONFIG_DIR>/.env
+      - <CONFIG_DIR>/.env.local
+```
+
+### Reusable registries and defaults
+
+Define named health checks and hooks once, then reference them by name. Use
+`proc_defaults` to merge shared settings under every process:
+
+```yaml
+healthchecks:
+  http-ok:
+    cmd: "curl -fsS http://localhost:%PORT%/health"
+    interval: 5s
+
+hooks:
+  slack-alert:
+    cmd: "./scripts/slack.sh"
+    async: true
+
+proc_defaults:
+  autorestart: true
+
+procs:
+  api:
+    shell: "node api.js"
+    vars: { PORT: 3000 }
+    healthchecks: [http-ok]
+    hooks:
+      failed: slack-alert
+```
+
+### Full config reference
+
+Top-level keys include `procs`, `proc_defaults`, `healthchecks`, `hooks`,
+`log`, `tui`, `keymap`, `on_init`, `on_all_finished`, and `on_client_exit`.
+See [`schemas/dekit.json`](schemas/dekit.json) for every field and its
+defaults.
+
+## Dashboard
+
+The process panel includes a **dependency-graph dashboard** that renders your
+processes as a DAG — showing how `deps`, health checks, and one-shots connect
+and what is currently gating what.
+
+## Default keymap
 
 Process list focused:
 
-- `q` - Quit (soft kill processes and wait then to exit)
-- `Q` - Force quit (terminate processes)
-- `p` - All commands
-- `C-a` - Focus output pane
-- `x` - Soft kill selected process (send SIGTERM signal, hard kill on Windows)
-- `X` - Hard kill selected process (send SIGKILL)
-- `s` - Start selected process, if it is not running
-- `r` - Soft kill selected process and restart it when it stops
-- `R` - Hard kill selected process and restart it when it stops
-- `a` - Add new process
-- `C` - Duplicate selected process
-- `d` - Remove selected process (process must be stopped first)
-- `e` - Rename selected process
-- `k` or `↑` - Select previous process
-- `j` or `↓` - Select next process
-- `M-1` - `M-8` - Select process 1-8
-- `C-d` or `page down` - Scroll output down
-- `C-u` or `page up` - Scroll output up
-- `C-e` - Scroll output down by 3 lines
-- `C-y` - Scroll output up by 3 lines
-- `z` - Zoom into terminal window
-- `v` - Enter copy mode
+- `q` — Quit (soft kill processes, then exit)
+- `Q` — Force quit (terminate processes)
+- `p` — All commands
+- `C-a` — Focus output pane
+- `x` — Soft kill selected process
+- `X` — Hard kill selected process
+- `s` — Start selected process
+- `r` — Soft kill and restart
+- `R` — Hard kill and restart
+- `a` — Add new process
+- `C` — Duplicate selected process
+- `d` — Remove selected process (must be stopped first)
+- `e` — Rename selected process
+- `Tab` or `Space` — Expand/collapse a process's health-check and hook children
+- `k` / `↑` — Select previous process
+- `j` / `↓` — Select next process
+- `M-1`–`M-8` — Select process 1–8
+- `C-d` / `page down` — Scroll output down
+- `C-u` / `page up` — Scroll output up
+- `C-e` — Scroll output down by 3 lines
+- `C-y` — Scroll output up by 3 lines
+- `z` — Zoom into terminal window
+- `v` — Enter copy mode
+- `?` — Toggle the keymap window
 
 Process output focused:
 
-- `C-a` - Focus processes pane
+- `C-a` — Focus processes pane
 
 Copy mode:
 
-- `v` - Start selecting end point
-- `c` - Copy selected text
-- `Esc` - Leave copy mode
-- `C-a` - Focus processes pane
-- `C-d` or `page down` - Scroll output down
-- `C-u` or `page up` - Scroll output up
-- `C-e` - Scroll output down by 3 lines
-- `C-y` - Scroll output up by 3 lines
-- `k` or `↑` - Move cursor up
-- `l` or `→` - Move cursor right
-- `j` or `↓` - Move cursor down
-- `h` or `←` - Move cursor left
+- `v` — Start selecting end point
+- `c` — Copy selected text
+- `Esc` — Leave copy mode
+- `C-a` — Focus processes pane
+- `k`/`l`/`j`/`h` or arrows — Move cursor
 
-#### How to copy text
+Key bindings can be overridden per scope under `keymap` in `dekit.yaml`. See
+`schemas/dekit.json` for the available actions.
 
-1. Press `v` to enter copy mode.
-2. Move cursor to the beginning of the text you want to copy.
-3. Press `v` to start selection.
-4. Move cursor to the end of the text.
-5. Press `c` to copy selected text to the clipboard.
+## Running the legacy mprocs CLI
 
-### Remote control
+The original mprocs behavior (the `mprocs.yaml` format, `--ctl`, `--npm`,
+`--procfile`, the TCP remote-control server, etc.) is still available:
 
-Optionally, _mprocs_ can listen on TCP port for remote commands.
-You have to define remote control server address in `mprocs.yaml`
-(`server: 127.0.0.1:4050`) or via cli argument (`mprocs --server 127.0.0.1:4050`). To send a command to running _mprocs_ instance
-use the **ctl** argument: `mprocs --ctl '{c: quit}'` or `mprocs --ctl '{c: send-key, key: <C-c>}'`.
-
-Alternatively, you can use the **exec** argument to send an initial command to
-the current foreground process on startup: `mprocs --on-init '{c:
-restart-all}'`.
-
-Commands are encoded as yaml. Available commands:
-
-- `{c: quit-or-ask}` - Stop processes and quit. If any processes are running,
-  show a confirmation dialog.
-- `{c: quit}` - Stop processes and quit. Does not show confirm dialog.
-- `{c: force-quit}`
-- `{c: toggle-focus}` - Toggle focus between process list and terminal.
-- `{c: focus-procs}` - Focus process list
-- `{c: focus-term}` - Focus process terminal window
-- `{c: zoom}` - Zoom into terminal window
-- `{c: next-proc}`
-- `{c: prev-proc}`
-- `{c: select-proc, index: <PROCESS INDEX>}` - Select process by index, top process has index 0
-- `{c: start-proc}`
-- `{c: term-proc}`
-- `{c: kill-proc}`
-- `{c: restart-proc}` - Restart selected process
-- `{c: restart-all}` - Restart all processes
-- `{c: force-restart-proc}` - Restart selected process by sending SIGKILL
-- `{c: force-restart-all}`
-- `{c: show-commands-menu}` - All commands
-- `{c: show-add-proc}`
-- `{c: add-proc, cmd: "<SHELL COMMAND>", name: "<PROC NAME>"}` - Add proccess. `name` field is optional.
-- `{c: duplicate-proc}`
-- `{c: show-remove-proc}`
-- `{c: remove-proc, id: "<PROCESS ID>"}`
-- `{c: show-rename-proc}`
-- `{c: rename-proc, name: "<NEW_NAME>"}` - Rename currently selected process
-- `{c: scroll-down}`
-- `{c: scroll-up}`
-- `{c: scroll-down-lines, n: <COUNT>}`
-- `{c: scroll-up-lines, n: <COUNT>}`
-- `{c: copy-mode-enter}` - Enter copy mode
-- `{c: copy-mode-leave}` - Leave copy mode
-- `{c: copy-mode-move, dir: <DIRECTION> }` - Move starting or ending position
-  of the selection. Available directions: `up/right/down/left`.
-- `{c: copy-mode-end}` - Start selecting end point of the selection.
-- `{c: copy-mode-copy}` - Copy selected text to the clipboard and leave copy
-  mode.
-- `{c: send-key, key: "<KEY>"}` - Send key to current process. Key examples:
-  `<C-a>`, `<Enter>`
-- `{c: batch, cmds: [{c: focus-procs}, …]}` - Send multiple commands
-
-## FAQ
-
-### mprocs vs tmux/screen
-
-_mprocs_ is meant to make it easier to run specific commands that you end up
-running repeatedly, such as compilers and test runners. This is in contrast
-with _tmux_, which is usually used to run much more long-lived processes -
-usually a shell - in each window/pane. Another difference is that _tmux_ runs a
-server and a client, which allows the client to detach and reattach later,
-keeping the processes running. _mprocs_ is meant more for finite lifetime
-processes that you keep re-running, but when _mprocs_ ends, so do the processes
-it is running within its windows.
-
-### Copying doesn't work in tmux
-
-Tmux doesn't have escape sequences for copying enabled by default. To enable it
-add the following to `~/.tmux.conf`:
-
+```sh
+dekit mprocs "yarn test -w" "webpack serve"
+dekit mprocs --npm
+dekit mprocs --ctl '{c: quit}'
 ```
-set -g set-clipboard on
-```
+
+The legacy config schema is at
+[`schemas/mprocs.json`](schemas/mprocs.json).
+
+## Credits
+
+dekit is built on [mprocs](https://github.com/pvolok/mprocs) by Pavel Volokitin
+and contributors — including the daemon/client architecture, the terminal UI,
+copy mode, the JS scripting layer, and the `dekit` rename itself. Huge thanks
+to that project; this fork would not exist without it.
+
+This fork's own contribution is the process-orchestration layer on top: health
+checks, dependencies, lifecycle hooks, one-shot tasks, the dependency-graph
+dashboard, and conveniences like `env_file` and `restart_delay`.
