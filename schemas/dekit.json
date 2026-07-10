@@ -98,6 +98,13 @@
             "oneOf": [{ "type": "string" }, { "type": "null" }]
           }
         },
+        "env_file": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ],
+          "description": "Load env variables from one or more dotenv files, in order (later files override earlier ones). `env` overrides file values. %VAR% tokens are substituted from `vars`."
+        },
         "add_path": {
           "type": "array",
           "items": { "type": "string" },
@@ -161,6 +168,7 @@
         "hooks": { "$ref": "#/definitions/hookSet" },
         "cwd": true,
         "env": true,
+        "env_file": true,
         "add_path": true,
         "autostart": true,
         "autorestart": true,

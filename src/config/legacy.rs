@@ -44,6 +44,7 @@ impl From<crate::mprocs::config::ProcConfig> for ProcConfig {
       deps: legacy.deps,
       cwd: legacy.cwd,
       env: legacy.env,
+      env_file: None,
       add_path: Some(legacy.add_path).filter(|p| !p.is_empty()),
       autostart: Some(legacy.autostart),
       autorestart: Some(legacy.autorestart),

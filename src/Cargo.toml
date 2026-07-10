@@ -32,6 +32,7 @@ assert_matches = "1.5.0"
 base64 = "0.22.0"
 clap = { version = "4.3.19", features = ["cargo"] }
 clipboard-win = "5.3.1"
+dotenvy = "0.15.7"
 dunce = "1.0.4"
 # Excluded "textfilter" feature that depends on regex (~0.7 MiB).
 flexi_logger = { version = "0.31.2", default-features = false, features = [
