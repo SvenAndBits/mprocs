@@ -149,6 +149,12 @@ settings in the _global_ config.
   - **env**: _object<string, string|null>_ - Set env variables. Object keys are
     variable names. Assign variable to null, to clear variables inherited from
     parent process.
+  - **env_file**: _string|array<string>_ - Load env variables from one or more
+    dotenv files. Files are loaded in order (first to last); later files
+    override earlier ones, and variables set via **env** override values from
+    files. Values support the same `%VAR%` substitution as **env** and
+    **vars**. Prefix a path with `<CONFIG_DIR>` to resolve it relative to the
+    config file's directory.
   - **add_path**: _string|array<string>_ - Add entries to the _PATH_
     environment variable.
   - **autostart**: _bool_ - Start process when mprocs starts. Default: _true_.

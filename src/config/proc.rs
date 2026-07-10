@@ -25,6 +25,7 @@ pub struct ProcConfig {
 
   pub cwd: Option<OsString>,
   pub env: Option<IndexMap<String, Option<String>>>,
+  pub env_file: Option<Vars>,
   pub add_path: Option<Vec<PathBuf>>,
   pub autostart: Option<bool>,
   pub autorestart: Option<bool>,
@@ -56,6 +57,7 @@ impl ProcConfig {
       },
       cwd: over.cwd.or(self.cwd),
       env: over.env.or(self.env),
+      env_file: over.env_file.or(self.env_file),
       add_path: over.add_path.or(self.add_path),
       autostart: over.autostart.or(self.autostart),
       autorestart: over.autorestart.or(self.autorestart),
@@ -118,6 +120,9 @@ pub(crate) fn parse_proc_settings(
     p.cwd = Some(cx.resolve_path(cwd.as_str()?).into_os_string());
   }
   p.env = obj.optional("env", cx)?;
+  if let Some(node) = obj.get("env_file") {
+    p.env_file = Some(parse_env_file(&node, cx)?);
+  }
   p.add_path = obj.optional("add_path", cx)?;
   p.autostart = obj.optional("autostart", cx)?;
   p.autorestart = obj.optional("autorestart", cx)?;
@@ -135,6 +140,32 @@ pub(crate) fn parse_proc_settings(
     p.vars = vars;
   }
   Ok(p)
+}
+
+fn parse_env_file(node: &CfgNode<'_>, cx: &CfgCx) -> Result<Vars> {
+  let paths: Vec<PathBuf> = if node.is_string() {
+    vec![cx.resolve_path(node.as_str()?)]
+  } else {
+    node
+      .as_arr()?
+      .iter()
+      .map(|item| Ok(cx.resolve_path(item.as_str()?)))
+      .collect::<Result<Vec<_>>>()?
+  };
+
+  let mut vars = Vars::new();
+  for path in paths {
+    let iter = dotenvy::from_path_iter(&path).map_err(|e| {
+      node.error(format!("failed to read env_file {}: {e}", path.display()))
+    })?;
+    for entry in iter {
+      let (k, v) = entry.map_err(|e| {
+        node.error(format!("failed to parse env_file {}: {e}", path.display()))
+      })?;
+      vars.insert(k, v);
+    }
+  }
+  Ok(vars)
 }
 
 fn var_value(node: &CfgNode<'_>) -> Result<String> {
@@ -170,6 +201,82 @@ mod tests {
     assert_eq!(cfg.vars.get("PORT").map(String::as_str), Some("3000"));
     assert_eq!(cfg.vars.get("FLAG").map(String::as_str), Some("true"));
     assert_eq!(cfg.vars.get("HOST").map(String::as_str), Some("localhost"));
+  }
+
+  fn build_spec(yaml: &str) -> ProcessSpec {
+    let raw: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    let node = CfgNode::new(&raw, CfgPath::root());
+    let cx = CfgCx::new(std::path::PathBuf::from("."));
+    let cfg = proc_from_cfg(
+      "web".to_string(),
+      &node,
+      &cx,
+      &Default::default(),
+      &Default::default(),
+    )
+    .unwrap();
+    ProcessSpec::from(&cfg)
+  }
+
+  fn write_tmp(name: &str, contents: &str) -> std::path::PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!("mprocs_envfile_{}_{name}", std::process::id()));
+    std::fs::write(&path, contents).unwrap();
+    path
+  }
+
+  #[test]
+  fn env_file_loads_and_orders_and_substitutes() {
+    let base = write_tmp("base.env", "A=from_base\nB=from_base\n");
+    let over = write_tmp("over.env", "B=from_over\nURL=http://%HOST%:%PORT%\n");
+    let yaml = format!(
+      "shell: echo hi\nvars:\n  HOST: localhost\n  PORT: 3000\nenv:\n  A: from_inline\nenv_file:\n  - {}\n  - {}\n",
+      base.display(),
+      over.display(),
+    );
+
+    let spec = build_spec(&yaml);
+    let get = |k: &str| spec.env.get(k).cloned().flatten();
+
+    assert_eq!(get("A").as_deref(), Some("from_inline"));
+    assert_eq!(get("B").as_deref(), Some("from_over"));
+    assert_eq!(get("URL").as_deref(), Some("http://localhost:3000"));
+
+    std::fs::remove_file(base).ok();
+    std::fs::remove_file(over).ok();
+  }
+
+  #[test]
+  fn env_file_accepts_single_string() {
+    let file = write_tmp("single.env", "SOLO=yes\n");
+    let yaml =
+      format!("shell: echo hi\nenv_file: {}\n", file.display());
+
+    let spec = build_spec(&yaml);
+    assert_eq!(
+      spec.env.get("SOLO").cloned().flatten().as_deref(),
+      Some("yes")
+    );
+
+    std::fs::remove_file(file).ok();
+  }
+
+  #[test]
+  fn env_file_missing_is_an_error() {
+    let raw: serde_yaml::Value = serde_yaml::from_str(
+      "shell: echo hi\nenv_file: /nonexistent/mprocs-does-not-exist.env\n",
+    )
+    .unwrap();
+    let node = CfgNode::new(&raw, CfgPath::root());
+    let cx = CfgCx::new(std::path::PathBuf::from("."));
+    let result = proc_from_cfg(
+      "web".to_string(),
+      &node,
+      &cx,
+      &Default::default(),
+      &Default::default(),
+    );
+    assert!(result.is_err());
   }
 }
 
@@ -244,6 +351,12 @@ impl From<&ProcConfig> for ProcessSpec {
       None => ProcessSpec::from_argv(Vec::new()),
     };
 
+    if let Some(env_file) = &cfg.env_file {
+      for (k, v) in env_file {
+        cmd.env(k, substitute_vars(v, vars));
+      }
+    }
+
     if let Some(env) = &cfg.env {
       for (k, v) in env {
         if let Some(v) = v {
@@ -261,6 +374,9 @@ impl From<&ProcConfig> for ProcessSpec {
         .env
         .as_ref()
         .and_then(|env| env.get("PATH").cloned().flatten())
+        .or_else(|| {
+          cfg.env_file.as_ref().and_then(|env| env.get("PATH").cloned())
+        })
         .or_else(|| std::env::var("PATH").ok());
       let mut paths: Vec<PathBuf> = base
         .map(|p| std::env::split_paths(&p).collect())
